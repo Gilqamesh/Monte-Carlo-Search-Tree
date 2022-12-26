@@ -41,12 +41,12 @@ struct UtilityEstimationResult
     bool should_prune;
 };
 
-using MoveChain = vector<Move>;
+using MoveSequence = vector<Move>;
 using MoveSet = unordered_set<Move>;
 using MoveProcessor = function<void(MoveSet &available_moves, Move move)>;
-using SimulateFromState = function<SimulationResult(const MoveChain &move_chain_from_world_state)>;
-using TerminationPredicate = function<bool(bool terminate_caller)>;
-using UtilityEstimationFromState = function<UtilityEstimationResult(const MoveChain &move_chain_from_world_state)>;
+using SimulateFromState = function<SimulationResult(const MoveSequence &move_chain_from_world_state)>;
+using TerminationPredicate = function<bool()>;
+using UtilityEstimationFromState = function<UtilityEstimationResult(const MoveSequence &move_chain_from_world_state)>;
 
 struct Node
 {
@@ -76,7 +76,7 @@ private:
     struct SelectionResult
     {
         Node *selected_node;
-        MoveChain movechain_from_state;
+        MoveSequence movechain_from_state;
     };
 
     SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, MoveProcessor move_processor, UtilityEstimationFromState utility_estimation_from_state);
@@ -85,7 +85,7 @@ private:
 
     Node *_AllocateNode(void);
 
-    using WinningMoveSelectionStrategy = function<Move(Node *from_node, const MoveSet &legal_moves_at_root_node, unsigned int)>;
+    using WinningMoveSelectionStrategy = function<Move(Node *from_node, const MoveSet &legal_moves_at_root_node)>;
     WinningMoveSelectionStrategy winning_move_selection_strategy_fn;
 };
 

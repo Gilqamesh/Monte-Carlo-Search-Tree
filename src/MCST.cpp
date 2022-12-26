@@ -15,73 +15,72 @@ static double UCT(Node *node, unsigned int number_of_branches, unsigned int dept
     double result = 0.0;
 
     double depth_weight = 0.0;
-    double number_of_branches_weight = 1.0;
-    double weighted_exploration_factor = EXPLORATION_FACTOR / (number_of_branches * number_of_branches_weight + depth * depth_weight);
+    double number_of_branches_weight = pow(1.05, number_of_branches);
+    double weighted_exploration_factor = EXPLORATION_FACTOR / (number_of_branches_weight + depth * depth_weight);
     result = (double)node->value / (double)node->num_simulations +
              weighted_exploration_factor * sqrt(log((double)node->parent->num_simulations) / (double)node->num_simulations);
 
     return result;
 }
 
-static Move _EvaluateBasedOnMostSimulated(Node *node_to_evaluate_from, const MoveSet &legal_moveset_at_node_to_evaluate_from, unsigned int depth)
+static Move _EvaluateBasedOnMostSimulated(Node *node_to_evaluate_from, const MoveSet &legal_moveset_at_node_to_evaluate_from)
 {
-    // NOTE(david): for the other algorithm it makes sense to use depth, but not in this one, not good design
-    (void)depth;
-    bool is_most_simulated_move_initialized = false;
-    pair<unsigned int, Move> most_simulated_move = {};
+    unsigned int max_num_simulation = 0;
+    Move max_num_simulation_move = Move::NONE;
     for (const auto &move : legal_moveset_at_node_to_evaluate_from)
     {
         auto it = node_to_evaluate_from->children.find(move);
         if (it == node_to_evaluate_from->children.end())
         {
+            // this move is either pruned out or not simulated yet
             continue;
         }
-        if (is_most_simulated_move_initialized == false || it->second->num_simulations > most_simulated_move.first)
+        if (max_num_simulation_move == Move::NONE || it->second->num_simulations > max_num_simulation)
         {
-            most_simulated_move = {it->second->num_simulations, move};
+            max_num_simulation_move = move;
+            max_num_simulation = it->second->num_simulations;
         }
-        is_most_simulated_move_initialized = true;
     }
-    if (is_most_simulated_move_initialized == false)
+    if (max_num_simulation_move == Move::NONE)
     {
         throw runtime_error("Need at least 1 simulation");
     }
 
-    return most_simulated_move.second;
+    return max_num_simulation_move;
 }
 
-static Move _EvaluateBasedOnValue(Node *node_to_evaluate_from, const MoveSet &legal_moveset_at_node_to_evaluate_from, unsigned int depth)
+static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &legal_moveset_at_node_to_evaluate_from)
 {
-    double highest_average_value = 0.0;
-    Move highest_average_move = Move::NONE;
+    double highest_uct = 0.0;
+    Move highest_uct_move = Move::NONE;
     for (const auto &move : legal_moveset_at_node_to_evaluate_from)
     {
-        if (node_to_evaluate_from->children.count(move) == 0)
+        auto it = node_to_evaluate_from->children.find(move);
+        if (it == node_to_evaluate_from->children.end())
         {
             // this move is either pruned out or not simulated yet
             continue;
         }
-        Node *child_node = node_to_evaluate_from->children[move];
-        double average_value = child_node->value / (double)child_node->num_simulations;
-        if (highest_average_move == Move::NONE || average_value > highest_average_value)
+        double uct = UCT(it->second, legal_moveset_at_node_to_evaluate_from.size(), 0);
+        if (highest_uct_move == Move::NONE || uct > highest_uct)
         {
-            highest_average_value = average_value;
-            highest_average_move = move;
+            highest_uct = uct;
+            highest_uct_move = move;
         }
     }
 
-    if (highest_average_move == Move::NONE)
+    if (highest_uct_move == Move::NONE)
     {
         throw runtime_error("either no simulations are run yet or all moves are pruned out");
     }
 
-    return highest_average_move;
+    return highest_uct_move;
 }
 
 MCST::MCST()
 {
     _root = _AllocateNode();
-    winning_move_selection_strategy_fn = &_EvaluateBasedOnValue;
+    winning_move_selection_strategy_fn = &_EvaluateBasedOnMostSimulated;
 }
 
 static void _delete_node(Node *current_node)
@@ -105,31 +104,31 @@ static string MoveToWord(Move move)
 {
     switch (move)
     {
-    case TOP_LEFT:
-        return "TOP_LEFT";
-    case TOP_MID:
-        return "TOP_MID";
-    case TOP_RIGHT:
-        return "TOP_RIGHT";
-    case MID_LEFT:
-        return "MID_LEFT";
-    case MID_MID:
-        return "MID_MID";
-    case MID_RIGHT:
-        return "MID_RIGHT";
-    case BOTTOM_LEFT:
-        return "BOTTOM_LEFT";
-    case BOTTOM_MID:
-        return "BOTTOM_MID";
-    case BOTTOM_RIGHT:
-        return "BOTTOM_RIGHT";
-    case NONE:
-        return "NONE";
-    default:
-    {
-        UNREACHABLE_CODE;
-        return "Breh";
-    }
+        case TOP_LEFT:
+            return "TOP_LEFT";
+        case TOP_MID:
+            return "TOP_MID";
+        case TOP_RIGHT:
+            return "TOP_RIGHT";
+        case MID_LEFT:
+            return "MID_LEFT";
+        case MID_MID:
+            return "MID_MID";
+        case MID_RIGHT:
+            return "MID_RIGHT";
+        case BOTTOM_LEFT:
+            return "BOTTOM_LEFT";
+        case BOTTOM_MID:
+            return "BOTTOM_MID";
+        case BOTTOM_RIGHT:
+            return "BOTTOM_RIGHT";
+        case NONE:
+            return "NONE";
+        default:
+        {
+            UNREACHABLE_CODE;
+            return "Breh";
+        }
     }
 }
 
@@ -164,11 +163,11 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
 {
     if (legal_moveset_at_root_node.size() == 0)
     {
-        termination_predicate(true);
+        termination_predicate();
         return Move::NONE;
     }
 
-    while (termination_predicate(false) == false)
+    while (termination_predicate() == false)
     {
         SelectionResult selection_result = _Selection(legal_moveset_at_root_node, move_processor, utility_estimation_from_state);
 
@@ -179,22 +178,26 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
 
     DebugPrintDecisionTree(_root, legal_moveset_at_root_node, g_move_counter);
 
-    Move result_move = winning_move_selection_strategy_fn(_root, legal_moveset_at_root_node, 0);
+    Move result_move = winning_move_selection_strategy_fn(_root, legal_moveset_at_root_node);
 
     return result_move;
 }
 
-static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &moveset_from_node, UtilityEstimationFromState utility_estimation_from_state, const MoveChain &movechain_from_state, unsigned int depth)
+static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, UtilityEstimationFromState utility_estimation_from_state, const MoveSequence &movechain_from_state, unsigned int depth)
 {
     // Find the maximum UCT value and its corresponding legal move
-    Move selected_legal_move = Move::NONE;
     Node *selected_node = nullptr;
+    Move selected_legal_move = Move::NONE;
+
+    // prune nodes that don't pass the heuristic utility estimate
     Node *highest_pruned_node = nullptr;
     Move highest_pruned_move = Move::NONE;
     double highest_pruned_node_utility = 0.0;
-    for (const auto &move : moveset_from_node)
+    for (const auto &move : legal_moves_from_node)
     {
         UtilityEstimationResult utility_estimation_result = utility_estimation_from_state(movechain_from_state);
+        // TODO(david): test pruning
+        assert(utility_estimation_result.should_prune == false);
         if (utility_estimation_result.should_prune)
         {
             if (highest_pruned_move == Move::NONE || utility_estimation_result.utility > highest_pruned_node_utility)
@@ -213,15 +216,17 @@ static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &moveset_f
             continue;
         }
 
-        if (from_node->children.count(move) == 0)
+        auto child_node_it = from_node->children.find(move);
+        if (child_node_it == from_node->children.end())
         {
+            // found a move/node that hasn't been simulated yet -> uct is infinite
             selected_node = nullptr;
             selected_legal_move = move;
-            break;
+            break ;
         }
-        Node *child_node = from_node->children[move];
-        double uct = UCT(child_node, moveset_from_node.size(), depth);
-        if (selected_legal_move == Move::NONE || uct > UCT(from_node->children[selected_legal_move], moveset_from_node.size(), depth))
+        Node *child_node = child_node_it->second;
+        double uct = UCT(child_node, legal_moves_from_node.size() - 1, depth);
+        if (selected_legal_move == Move::NONE || uct > UCT(from_node->children[selected_legal_move], legal_moves_from_node.size() - 1, depth))
         {
             selected_legal_move = move;
             selected_node = child_node;
@@ -241,6 +246,7 @@ static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &moveset_f
 }
 
 // TODO(david): use transposition table to speed up the selection, which would store previous searches, allowing to avoid re-exploring parts of the tree that have already been searched
+// TODO(david): LRU?
 MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node, MoveProcessor move_processor, UtilityEstimationFromState utility_estimation_from_state)
 {
     assert(legal_moveset_at_root_node.empty() == false);
@@ -254,26 +260,27 @@ MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node
     {
         if (current_legal_moves.size() == 0)
         {
-            // no more legal moves -> reached a terminal node
-            break;
+            // no more legal moves, reached a terminal node
+            break ;
         }
 
-        // Find the maximum UCT value and its corresponding legal move
-        auto [selected_legal_move, selected_node] = _SelectChild(current_node, current_legal_moves, utility_estimation_from_state, selection_result.movechain_from_state, depth);
+        // Select a child node and its corresponding legal move based on maximum UCT value and some other heuristic
+        auto [selected_move, selected_node] = _SelectChild(current_node, current_legal_moves, utility_estimation_from_state, selection_result.movechain_from_state, depth);
         if (selected_node == nullptr)
         {
-            // If not all children have been simulated, expand
+            // found a child that hasn't been simulated yet -> expand
             selected_node = _Expansion(current_node);
-            current_node->children.emplace(pair<Move, Node *>(selected_legal_move, selected_node));
+            current_node->children.insert({selected_move, selected_node});
             selection_result.selected_node = selected_node;
-            selection_result.movechain_from_state.push_back(selected_legal_move);
+            selection_result.movechain_from_state.push_back(selected_move);
+            move_processor(current_legal_moves, selected_move);
             return selection_result;
         }
         assert(selected_node != nullptr);
 
         selection_result.selected_node = selected_node;
-        selection_result.movechain_from_state.push_back(selected_legal_move);
-        move_processor(current_legal_moves, selected_legal_move);
+        selection_result.movechain_from_state.push_back(selected_move);
+        move_processor(current_legal_moves, selected_move);
         current_node = selected_node;
         ++depth;
     }
