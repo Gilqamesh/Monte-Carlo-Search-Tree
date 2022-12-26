@@ -1,0 +1,5 @@
+(depth: 0, value: -4, num_simulations: 2868, move: NONE)
+    (depth: 1, value: -4, num_simulations: 4, move: MID_MID)
+        (depth: 2, value: -3, num_simulations: 3, move: BOTTOM_RIGHT)
+    (depth: 1, value: 0, num_simulations: 2864, move: BOTTOM_RIGHT)
+        (depth: 2, value: 0, num_simulations: 2863, move: MID_MID)
