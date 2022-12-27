@@ -1,7 +1,0 @@
-(depth: 0, value: 274600, num_simulations: 2940, move: NONE)
-    (depth: 1, value: -800, num_simulations: 10, move: TOP_LEFT)
-    (depth: 1, value: -600, num_simulations: 10, move: TOP_MID)
-    (depth: 1, value: 278200, num_simulations: 2890, move: TOP_RIGHT)
-    (depth: 1, value: -900, num_simulations: 10, move: MID_LEFT)
-    (depth: 1, value: -400, num_simulations: 10, move: MID_RIGHT)
-    (depth: 1, value: -900, num_simulations: 10, move: BOTTOM_LEFT)

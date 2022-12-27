@@ -33,6 +33,7 @@ struct SimulationResult
 {
     unsigned int num_simulations;
     double total_value;
+    bool is_terminal_simulation;
 };
 
 struct UtilityEstimationResult
@@ -52,6 +53,7 @@ struct Node
 {
     double value;
     unsigned int num_simulations;
+    bool is_pruned;
 
     unordered_map<Move, Node *> children;
     Node *parent;
@@ -68,7 +70,7 @@ public:
     MCST(const MCST &other) = delete;
     const MCST &operator=(const MCST &other) = delete;
 
-    Move Evaluate(const MoveSet &legal_moves_at_root_node, TerminationPredicate terminate_condition_fn, SimulateFromState simulation_from_state, MoveProcessor move_processor, UtilityEstimationFromState utility_estimation_from_state);
+    Move Evaluate(const MoveSet &legal_moves_at_root_node, TerminationPredicate terminate_condition_fn, SimulateFromState simulation_from_state, MoveProcessor move_processor, UtilityEstimationFromState utility_estimation_from_state, double prune_treshhold_for_node);
 
     unsigned int NumberOfSimulationsRan(void);
 
@@ -81,9 +83,10 @@ private:
 
     SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, MoveProcessor move_processor, UtilityEstimationFromState utility_estimation_from_state);
     Node *_Expansion(Node *from_node);
-    void _BackPropagate(Node *from_node, SimulationResult simulation_result);
+    void _BackPropagate(Node *from_node, SimulationResult simulation_result, double prune_treshhold_for_node);
 
     Node *_AllocateNode(void);
+    void _DeleteNode(Node *node);
 
     using WinningMoveSelectionStrategy = function<Move(Node *from_node, const MoveSet &legal_moves_at_root_node)>;
     WinningMoveSelectionStrategy winning_move_selection_strategy_fn;

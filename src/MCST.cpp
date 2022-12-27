@@ -80,24 +80,24 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &lega
 MCST::MCST()
 {
     _root = _AllocateNode();
-    winning_move_selection_strategy_fn = &_EvaluateBasedOnMostSimulated;
+    winning_move_selection_strategy_fn = &_EvaluateBasedOnUCT;
 }
 
-static void _delete_node(Node *current_node)
+void MCST::_DeleteNode(Node *node)
 {
-    if (current_node)
+    if (node)
     {
-        for (auto child : current_node->children)
+        for (auto child : node->children)
         {
-            _delete_node(child.second);
+            _DeleteNode(child.second);
         }
     }
-    delete current_node;
+    delete node;
 }
 
 MCST::~MCST()
 {
-    _delete_node(_root);
+    _DeleteNode(_root);
 }
 
 static string MoveToWord(Move move)
@@ -135,7 +135,7 @@ static string MoveToWord(Move move)
 static void DebugPrintDecisionTreeHelper(Node *from_node, const MoveSet &legal_moveset_from_node, unsigned int depth, ofstream &fs, Move from_move)
 {
     fs << string(depth * 4, ' ') << "("
-       << "depth: " << depth << ", value: " << from_node->value << ", num_simulations: " << from_node->num_simulations << ", move: " << MoveToWord(from_move) << ")" << endl;
+       << "depth: " << depth << ", value: " << from_node->value << ", num_simulations: " << from_node->num_simulations << ", move: " << MoveToWord(from_move) << ", pruned: " << (from_node->is_pruned ? "yes" : "no") << ")" << endl;
 
     for (auto move : legal_moveset_from_node)
     {
@@ -159,7 +159,7 @@ static void DebugPrintDecisionTree(Node *from_node, const MoveSet &legal_moveset
 
 static unsigned int g_move_counter;
 
-Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredicate termination_predicate, SimulateFromState simulation_from_state, MoveProcessor move_processor, UtilityEstimationFromState utility_estimation_from_state)
+Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredicate termination_predicate, SimulateFromState simulation_from_state, MoveProcessor move_processor, UtilityEstimationFromState utility_estimation_from_state, double prune_treshhold_for_node)
 {
     if (legal_moveset_at_root_node.size() == 0)
     {
@@ -173,10 +173,12 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
 
         SimulationResult simulation_result = simulation_from_state(selection_result.movechain_from_state);
 
-        _BackPropagate(selection_result.selected_node, simulation_result);
+        _BackPropagate(selection_result.selected_node, simulation_result, prune_treshhold_for_node);
     }
 
+#if defined(DEBUG_PRINT_OUT)
     DebugPrintDecisionTree(_root, legal_moveset_at_root_node, g_move_counter);
+#endif
 
     Move result_move = winning_move_selection_strategy_fn(_root, legal_moveset_at_root_node);
 
@@ -225,6 +227,10 @@ static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &legal_mov
             break ;
         }
         Node *child_node = child_node_it->second;
+        if (child_node->is_pruned == true)
+        {
+            continue ;
+        }
         double uct = UCT(child_node, legal_moves_from_node.size() - 1, depth);
         if (selected_legal_move == Move::NONE || uct > UCT(from_node->children[selected_legal_move], legal_moves_from_node.size() - 1, depth))
         {
@@ -237,7 +243,8 @@ static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &legal_mov
     {
         if (highest_pruned_move == Move::NONE)
         {
-            throw runtime_error("no selected move and also no pruned moves");
+            // NOTE(david): prune from_node
+            from_node->is_pruned = true;
         }
         return make_pair(highest_pruned_move, highest_pruned_node);
     }
@@ -250,6 +257,8 @@ static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &legal_mov
 MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node, MoveProcessor move_processor, UtilityEstimationFromState utility_estimation_from_state)
 {
     assert(legal_moveset_at_root_node.empty() == false);
+    // TODO(david): if there is no move that passes the the treshhold value, we have no good moves, so at this point we should just return with our move selection strategy and end the Evaluation
+    assert(_root->is_pruned == false);
 
     SelectionResult selection_result = {};
 
@@ -266,6 +275,11 @@ MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node
 
         // Select a child node and its corresponding legal move based on maximum UCT value and some other heuristic
         auto [selected_move, selected_node] = _SelectChild(current_node, current_legal_moves, utility_estimation_from_state, selection_result.movechain_from_state, depth);
+        if (current_node->is_pruned == true)
+        {
+            // NOTE(david): if all children is pruned of the current node, start the selection again from the beginning
+            return _Selection(legal_moveset_at_root_node, move_processor, utility_estimation_from_state);
+        }
         if (selected_node == nullptr)
         {
             // found a child that hasn't been simulated yet -> expand
@@ -296,13 +310,21 @@ Node *MCST::_Expansion(Node *from_node)
     return result;
 }
 
-void MCST::_BackPropagate(Node *from_node, SimulationResult simulation_result)
+void MCST::_BackPropagate(Node *from_node, SimulationResult simulation_result, double prune_treshhold_for_node)
 {
-    while (from_node != nullptr)
+    // NOTE(david): if the simulation result was from a terminal node, based on a node value threshhold,
+    // prune the node
+    if (simulation_result.is_terminal_simulation == true)
     {
-        from_node->num_simulations += simulation_result.num_simulations;
-        from_node->value += simulation_result.total_value;
-        from_node = from_node->parent;
+        from_node->is_pruned = true;
+        return ;
+    }
+    Node *cur_node = from_node;
+    while (cur_node != nullptr)
+    {
+        cur_node->num_simulations += simulation_result.num_simulations;
+        cur_node->value += simulation_result.total_value;
+        cur_node = cur_node->parent;
     }
 }
 
@@ -313,6 +335,7 @@ Node *MCST::_AllocateNode(void)
     result->value = 0.0;
     result->num_simulations = 0;
     result->parent = nullptr;
+    result->is_pruned = false;
 
     return result;
 }

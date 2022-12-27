@@ -7,16 +7,22 @@
 #include <numeric>
 #include <algorithm>
 
+#if 1
+# define DEBUG_PRINT_OUT
+#endif
+
 #define LOG(msg) (cout << msg << endl)
 #define LINE() (LOG(__LINE__ << " " << __FILE__))
 #define UNREACHABLE_CODE (assert(false && "Invalid code path"))
 
 #include "MCST.cpp"
 
+static unsigned int g_seed;
 int GetRandomNumber(int min, int max)
 {
-    static std::random_device rd;  // Will be used to obtain a seed for the random number engine
-    static std::mt19937 gen(rd()); // Standard mersenne_twister_engine seeded with rd()
+    // static std::random_device rd;  // Will be used to obtain a seed for the random number engine
+    // static std::mt19937 gen(rd()); // Standard mersenne_twister_engine seeded with rd()
+    static std::mt19937 gen(g_seed);
     std::uniform_int_distribution<> dis(min, max);
     return dis(gen);
 }
@@ -77,7 +83,7 @@ struct GameState
 };
 GameState g_game_state;
 
-void PrintGameState(const GameState &game_state)
+void PrintGameState(const GameState &game_state, ostream &os)
 {
     for (unsigned int row = 0; row < 3; ++row)
     {
@@ -88,15 +94,15 @@ void PrintGameState(const GameState &game_state)
             if (player_it != game_state.move_to_player_map.end())
             {
                 Player player_that_made_move = player_it->second;
-                cout << (player_that_made_move == Player::CIRCLE ? "O" : "X");
+                os << (player_that_made_move == Player::CIRCLE ? "O" : "X");
             }
             else
             {
-                cout << ".";
+                os << ".";
             }
-            cout << " ";
+            os << " ";
         }
-        cout << endl;
+        os << endl;
     }
 }
 
@@ -171,21 +177,27 @@ void ProcessMove(MoveSet &available_moves, Move move)
     available_moves.erase(move);
 }
 
+bool g_should_write_out_simulation;
+ofstream g_write_out_for_simulation;
 // returns the simulation result
 double simulation_from_state_once(const MoveSequence &move_sequence_from_state)
 {
     GameState cur_world_state = g_game_state;
     Player player_that_needs_to_win = cur_world_state.player_to_move;
 
-    // static int debug_number_of_printouts = 0;
-    // LOG("Player about to move: " << PlayerToWord(cur_world_state.player_to_move));
-    // PrintGameState(cur_world_state);
-    // cout << "move sequence from state: ";
-    // for (auto move : move_sequence_from_state)
-    // {
-    //     cout << MoveToWord(move) << " ";
-    // }
-    // cout << endl;
+#if defined(DEBUG_PRINT_OUT)
+    if (g_should_write_out_simulation)
+    {
+        g_write_out_for_simulation << "Player about to move: " << PlayerToWord(cur_world_state.player_to_move) << endl;
+        PrintGameState(cur_world_state, g_write_out_for_simulation);
+        g_write_out_for_simulation << "move sequence from state: ";
+        for (auto move : move_sequence_from_state)
+        {
+            g_write_out_for_simulation << MoveToWord(move) << " ";
+        }
+        g_write_out_for_simulation << endl;
+    }
+#endif
 
     Player previous_player = (cur_world_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
 
@@ -220,25 +232,28 @@ double simulation_from_state_once(const MoveSequence &move_sequence_from_state)
         cur_world_state.player_to_move = (cur_world_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
     }
 
-    // LOG("Player to move: " << PlayerToWord(cur_world_state.player_to_move));
-    // PrintGameState(cur_world_state);
-    // LOG("Game outcome for previous player: " << GameOutcomeToWord(cur_world_state.outcome_for_previous_player));
-    // LOG("Previous player: " << PlayerToWord(previous_player));
-    // LOG("");
-    // if (++debug_number_of_printouts == 1000)
-    // {
-    //     exit(1);
-    // }
+#if defined(DEBUG_PRINT_OUT)
+    if (g_should_write_out_simulation)
+    {
+        g_write_out_for_simulation << "Player to move: " << PlayerToWord(cur_world_state.player_to_move) << endl;
+        PrintGameState(cur_world_state, g_write_out_for_simulation);
+        g_write_out_for_simulation << "Game outcome for previous player: " << GameOutcomeToWord(cur_world_state.outcome_for_previous_player) << endl;
+        g_write_out_for_simulation << "Previous player: " << PlayerToWord(previous_player) << endl;
+        g_write_out_for_simulation << "" << endl;
+    }
+#endif
 
     switch (cur_world_state.outcome_for_previous_player)
     {
         case GameOutcome::WIN: {
-            return player_that_needs_to_win == previous_player ? 100.0 : -100.0;
+            return player_that_needs_to_win == previous_player ? 1.0 : -1.0;
         } break ;
         case GameOutcome::LOSS: {
-            return player_that_needs_to_win == previous_player ? -100.0 : 100.0;
+            return player_that_needs_to_win == previous_player ? -1.0 : 1.0;
         } break ;
-        case GameOutcome::DRAW: return 0.0;
+        case GameOutcome::DRAW: {
+            return 0.0;
+        } break ;
         default:
         {
             UNREACHABLE_CODE;
@@ -251,14 +266,38 @@ SimulationResult simulation_from_state(const MoveSequence &move_sequence_from_st
 {
     SimulationResult simulation_result = {};
 
-    unsigned int number_of_simulations = 10;
+    g_should_write_out_simulation = true;
+
+#if defined(DEBUG_PRINT_OUT)
+    static unsigned int sim_counter = 0;
+    g_write_out_for_simulation = ofstream("debug/sim_result" + to_string(sim_counter++));
+#endif
+
+    // choose the number of simulations based on the number of possible moves
+    unsigned int number_of_moves_available_from_position = g_game_state.legal_moveset.size() - move_sequence_from_state.size();
+    if (number_of_moves_available_from_position == 0)
+    {
+        simulation_result.is_terminal_simulation = true;
+    }
+    unsigned int number_of_simulations_weight = number_of_moves_available_from_position + 1;
+    assert(number_of_simulations_weight > 0 );
+    unsigned int number_of_simulations = 15 * number_of_simulations_weight;
     simulation_result.num_simulations = number_of_simulations;
     for (unsigned int current_simulation_count = 0;
          current_simulation_count < number_of_simulations;
          ++current_simulation_count)
     {
-        simulation_result.total_value += simulation_from_state_once(move_sequence_from_state);
+        double simulation_value = simulation_from_state_once(move_sequence_from_state);
+        simulation_result.total_value += simulation_value;
+
+#if defined(DEBUG_PRINT_OUT)
+        g_write_out_for_simulation << simulation_value << " ";
+        g_should_write_out_simulation = false;
+#endif
     }
+#if defined(DEBUG_PRINT_OUT)
+    g_write_out_for_simulation << endl;
+#endif
 
     return simulation_result;
 }
@@ -274,8 +313,12 @@ UtilityEstimationResult utility_estimator(const MoveSequence &move_sequence_from
     return utility_estimation_result;
 }
 
-int main()
+int main(int argc, char **argv)
 {
+    if (argc > 1) {
+        g_seed = atoi(argv[1]);
+    }
+
     g_game_state.player_to_move = Player::CIRCLE;
     g_game_state.outcome_for_previous_player = GameOutcome::NONE;
     for (unsigned int row_index = 0; row_index < Move::NONE; ++row_index)
@@ -293,17 +336,20 @@ int main()
         Move selected_move;
         unsigned int number_of_simulations_ran = 0;
         bool should_terminate_simulation = false;
+        // NOTE(david): use the concept of confidence interval instead of this?
+        double prune_treshhold_for_node = -100.0;
         thread t([&]() {
             try
             {
                 selected_move = mcst.Evaluate(g_game_state.legal_moveset, [&](){
                     return should_terminate_simulation;
-                }, simulation_from_state, ProcessMove, utility_estimator);
+                }, simulation_from_state, ProcessMove, utility_estimator, prune_treshhold_for_node);
                 number_of_simulations_ran = mcst.NumberOfSimulationsRan();
             }
             catch (exception &e)
             {
                 LOG(e.what());
+                exit(1);
             }
         });
         while (std::chrono::steady_clock::now() - start_time < max_evaluation_time)
@@ -318,13 +364,14 @@ int main()
         if (selected_move != Move::NONE)
         {
             g_game_state.legal_moveset.erase(selected_move);
+            assert(g_game_state.move_to_player_map.count(selected_move) == 0);
             g_game_state.move_to_player_map.insert({selected_move, g_game_state.player_to_move});
         }
 
         g_game_state.outcome_for_previous_player = DetermineGameOutcome(g_game_state.move_to_player_map, g_game_state.player_to_move);
 
         LOG(PlayerToWord(g_game_state.player_to_move) << " moves " << MoveToWord(selected_move) << ", number of simulations ran: " << number_of_simulations_ran << ", move counter: " << g_move_counter);
-        PrintGameState(g_game_state);
+        PrintGameState(g_game_state, cout);
         LOG("");
         LOG("");
 
