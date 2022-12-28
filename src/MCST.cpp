@@ -59,8 +59,9 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &lega
         if (it == node_to_evaluate_from->children.end())
         {
             // this move is either pruned out or not simulated yet
-            continue;
+            continue ;
         }
+
         double uct = UCT(it->second, legal_moveset_at_node_to_evaluate_from.size(), 0);
         if (highest_uct_move == Move::NONE || uct > highest_uct)
         {
@@ -79,7 +80,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &lega
 
 MCST::MCST()
 {
-    _root = _AllocateNode();
+    _root_node = _AllocateNode();
     winning_move_selection_strategy_fn = &_EvaluateBasedOnUCT;
 }
 
@@ -97,7 +98,7 @@ void MCST::_DeleteNode(Node *node)
 
 MCST::~MCST()
 {
-    _DeleteNode(_root);
+    _DeleteNode(_root_node);
 }
 
 static string MoveToWord(Move move)
@@ -135,7 +136,7 @@ static string MoveToWord(Move move)
 static void DebugPrintDecisionTreeHelper(Node *from_node, const MoveSet &legal_moveset_from_node, unsigned int depth, ofstream &fs, Move from_move)
 {
     fs << string(depth * 4, ' ') << "("
-       << "depth: " << depth << ", value: " << from_node->value << ", num_simulations: " << from_node->num_simulations << ", move: " << MoveToWord(from_move) << ", pruned: " << (from_node->is_pruned ? "yes" : "no") << ")" << endl;
+       << "depth: " << depth << ", value: " << from_node->value << ", num_simulations: " << from_node->num_simulations << ", move: " << MoveToWord(from_move) << ", player to move: " << PlayerToWord(g_game_state.player_to_move) << ", pruned: " << (from_node->is_pruned ? "yes" : "no") << ")" << endl;
 
     for (auto move : legal_moveset_from_node)
     {
@@ -163,13 +164,20 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
 {
     if (legal_moveset_at_root_node.size() == 0)
     {
-        termination_predicate();
         return Move::NONE;
     }
+
+    // TODO(david): have a prior step that exploits moves that are bad in order to quickly prune out entire subtrees
 
     while (termination_predicate() == false)
     {
         SelectionResult selection_result = _Selection(legal_moveset_at_root_node, move_processor, utility_estimation_from_state);
+
+        if (selection_result.selected_node == nullptr)
+        {
+            // NOTE(david): all moves are pruned out, so just return with the most promising move based on the winning move selection strategy
+            break ;
+        }
 
         SimulationResult simulation_result = simulation_from_state(selection_result.movechain_from_state);
 
@@ -177,15 +185,15 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
     }
 
 #if defined(DEBUG_PRINT_OUT)
-    DebugPrintDecisionTree(_root, legal_moveset_at_root_node, g_move_counter);
+    DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter);
 #endif
 
-    Move result_move = winning_move_selection_strategy_fn(_root, legal_moveset_at_root_node);
+    Move result_move = winning_move_selection_strategy_fn(_root_node, legal_moveset_at_root_node);
 
     return result_move;
 }
 
-static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, UtilityEstimationFromState utility_estimation_from_state, const MoveSequence &movechain_from_state, unsigned int depth)
+pair<Move, Node *> MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, UtilityEstimationFromState utility_estimation_from_state, const MoveSequence &movechain_from_state, unsigned int depth, bool focus_on_lowest_utc_to_prune)
 {
     // Find the maximum UCT value and its corresponding legal move
     Node *selected_node = nullptr;
@@ -199,6 +207,7 @@ static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &legal_mov
     {
         UtilityEstimationResult utility_estimation_result = utility_estimation_from_state(movechain_from_state);
         // TODO(david): test pruning
+        // TODO(david): can I use the is_pruned field of Node here?
         assert(utility_estimation_result.should_prune == false);
         if (utility_estimation_result.should_prune)
         {
@@ -231,11 +240,22 @@ static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &legal_mov
         {
             continue ;
         }
-        double uct = UCT(child_node, legal_moves_from_node.size() - 1, depth);
-        if (selected_legal_move == Move::NONE || uct > UCT(from_node->children[selected_legal_move], legal_moves_from_node.size() - 1, depth))
+
+        if (selected_legal_move == Move::NONE)
         {
             selected_legal_move = move;
             selected_node = child_node;
+        }
+        else
+        {
+            double uct = UCT(child_node, legal_moves_from_node.size() - 1, depth);
+            double child_uct = UCT(from_node->children[selected_legal_move], legal_moves_from_node.size() - 1, depth);
+            bool should_replace_utc = (focus_on_lowest_utc_to_prune ? uct < child_uct : uct > child_uct);
+            if (should_replace_utc)
+            {
+                selected_legal_move = move;
+                selected_node = child_node;
+            }
         }
     }
 
@@ -243,7 +263,6 @@ static pair<Move, Node *> _SelectChild(Node *from_node, const MoveSet &legal_mov
     {
         if (highest_pruned_move == Move::NONE)
         {
-            // NOTE(david): prune from_node
             from_node->is_pruned = true;
         }
         return make_pair(highest_pruned_move, highest_pruned_node);
@@ -258,13 +277,14 @@ MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node
 {
     assert(legal_moveset_at_root_node.empty() == false);
     // TODO(david): if there is no move that passes the the treshhold value, we have no good moves, so at this point we should just return with our move selection strategy and end the Evaluation
-    assert(_root->is_pruned == false);
+    assert(_root_node->is_pruned == false);
 
     SelectionResult selection_result = {};
 
-    Node *current_node = _root;
+    Node *current_node = _root_node;
     MoveSet current_legal_moves = legal_moveset_at_root_node;
     unsigned int depth = 0;
+    bool focus_on_lowest_utc_to_prune = GetRandomNumber(0, 10) < 9;
     while (1)
     {
         if (current_legal_moves.size() == 0)
@@ -274,10 +294,16 @@ MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node
         }
 
         // Select a child node and its corresponding legal move based on maximum UCT value and some other heuristic
-        auto [selected_move, selected_node] = _SelectChild(current_node, current_legal_moves, utility_estimation_from_state, selection_result.movechain_from_state, depth);
-        if (current_node->is_pruned == true)
+        auto [selected_move, selected_node] = _SelectChild(current_node, current_legal_moves, utility_estimation_from_state, selection_result.movechain_from_state, depth, focus_on_lowest_utc_to_prune);
+        if (current_node->is_pruned)
         {
-            // NOTE(david): if all children is pruned of the current node, start the selection again from the beginning
+            if (current_node == _root_node)
+            {
+                // TODO(david): if there is no move that passes the the treshhold value, we have no good moves, so at this point we should just return with our move selection strategy and end the Evaluation
+                selection_result.selected_node = nullptr;
+                return selection_result;
+            }
+            // NOTE(david): current node is pruned now, so we should start with a new selection from the root
             return _Selection(legal_moveset_at_root_node, move_processor, utility_estimation_from_state);
         }
         if (selected_node == nullptr)
@@ -314,16 +340,45 @@ void MCST::_BackPropagate(Node *from_node, SimulationResult simulation_result, d
 {
     // NOTE(david): if the simulation result was from a terminal node, based on a node value threshhold,
     // prune the node
-    if (simulation_result.is_terminal_simulation == true)
+    if (simulation_result.last_move.was_terminal == true)
     {
-        from_node->is_pruned = true;
-        return ;
+        if (simulation_result.total_value <= prune_treshhold_for_node)
+        {
+            // cout << "Found pruned move, yay!" << endl;
+            from_node->is_pruned = true;
+            if (simulation_result.last_move.was_controlled)
+            {
+                return ;
+            }
+        }
     }
+    // NOTE(david): if from_node is terminally losing (aka there was a move which wasn't controlled by the player and resulted in a loss), then backpropagate this fact up to root, as this move is not optimal to play
     Node *cur_node = from_node;
     while (cur_node != nullptr)
     {
+        // if (cur_node != _root_node && from_node->is_pruned && simulation_result.last_move.was_controlled == false)
+        // {
+        //     assert(cur_node->parent != nullptr);
+        //     for (auto neighbor_node : cur_node->parent->children)
+        //     {
+        //         neighbor_node.second->is_pruned = true;
+        //         total_number_of_simulations_for_neighbors += neighbor_node.second->num_simulations;
+        //         total_value_for_neighbors += neighbor_node.second->value;
+        //     }
+        // }
         cur_node->num_simulations += simulation_result.num_simulations;
         cur_node->value += simulation_result.total_value;
+        if (cur_node != _root_node && from_node->is_pruned && simulation_result.last_move.was_controlled == false)
+        {
+            // cur_node->value = -INFINITY;
+            cur_node->is_pruned = true;
+            if (cur_node->parent == _root_node)
+            {
+                // TODO(david): I don't know how this assert can fail
+                assert(cur_node->parent->num_simulations > (cur_node->num_simulations - simulation_result.num_simulations));
+                // cur_node->parent->num_simulations -= (cur_node->num_simulations - simulation_result.num_simulations);
+            }
+        }
         cur_node = cur_node->parent;
     }
 }
@@ -342,5 +397,5 @@ Node *MCST::_AllocateNode(void)
 
 unsigned int MCST::NumberOfSimulationsRan(void)
 {
-    return _root->num_simulations;
+    return _root_node->num_simulations;
 }
