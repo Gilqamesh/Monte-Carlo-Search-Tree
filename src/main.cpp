@@ -10,26 +10,27 @@
 #include <unordered_set>
 #include <vector>
 #include <functional>
+#include "types.hpp"
 
 using namespace std;
 
-#if 0
-# define DEBUG_PRINT_OUT
+#if 1
+#define DEBUG_WRITE_OUT
 #endif
 
 #if 0
-# define DEBUG_PRINT_GAME
+#define DEBUG_PRINT
 #endif
 
-#define LOG(msg) (cout << msg << endl)
-#define LINE() (LOG(__LINE__ << " " << __FILE__))
+#define LOG(os, msg) (os << msg << endl)
+#define LOGN(os, msg) (os << msg)
+#define LOGV(os, msg) (os << msg << " - " << __LINE__ << " " << __FILE__ << endl)
+#define LOGVN(os, msg) (os << msg << " - " << __LINE__ << " " << __FILE__)
 #define UNREACHABLE_CODE (assert(false && "Invalid code path"))
 
 static std::mt19937 gen;
-int GetRandomNumber(int min, int max)
+i32 GetRandomNumber(i32 min, i32 max)
 {
-    // static std::random_device rd;  // Will be used to obtain a seed for the random number engine
-    // static std::mt19937 gen(rd()); // Standard mersenne_twister_engine seeded with rd()
     std::uniform_int_distribution<> dis(min, max);
     return dis(gen);
 }
@@ -37,7 +38,8 @@ int GetRandomNumber(int min, int max)
 enum class Player
 {
     CROSS,
-    CIRCLE
+    CIRCLE,
+    NONE
 };
 
 enum Move
@@ -54,8 +56,6 @@ enum Move
     NONE
 };
 
-using MoveToPlayerMap = unordered_map<Move, Player>;
-
 enum class GameOutcome
 {
     WIN,
@@ -64,41 +64,34 @@ enum class GameOutcome
     NONE
 };
 
-using MoveSet = unordered_set<Move>;
+// using MoveToPlayerMap: unordered_map<Move, Player -> Player[Move::NONE]
+using MoveToPlayerMap = Player[Move::NONE];
+
+// using MoveSet: unordered_set<Move> -> { Move[Move::NONE], u32 }
+struct MoveSet
+{
+    Move  moves[Move::NONE];
+    u32   moves_left;
+};
 
 struct GameState
 {
-    MoveToPlayerMap move_to_player_map;
-    Player player_to_move;
-    GameOutcome outcome_for_previous_player;
-    MoveSet legal_moveset;
+    MoveToPlayerMap  move_to_player_map;
+    Player           player_to_move;
+    GameOutcome      outcome_for_previous_player;
+    MoveSet          legal_moveset;
 };
 
 GameState g_game_state;
-
-static string GameOutcomeToWord(GameOutcome game_outcome)
-{
-    switch (game_outcome)
-    {
-        case GameOutcome::WIN: return "WIN";
-        case GameOutcome::LOSS: return "LOSS";
-        case GameOutcome::DRAW: return "DRAW";
-        case GameOutcome::NONE: return "NONE";
-        default: {
-            UNREACHABLE_CODE;
-            return "Breh";
-        }
-    }
-}
 
 static string PlayerToWord(Player player)
 {
     switch (player)
     {
         case Player::CIRCLE:
-            return "Player::CIRCLE";
+            return "CIRCLE";
         case Player::CROSS:
-            return "Player::CROSS";
+            return "CROSS";
         default:
         {
             UNREACHABLE_CODE;
@@ -109,51 +102,82 @@ static string PlayerToWord(Player player)
 
 #include "MCST.cpp"
 
+static string GameOutcomeToWord(GameOutcome game_outcome)
+{
+    switch (game_outcome)
+    {
+        case GameOutcome::WIN:
+            return "WIN";
+        case GameOutcome::LOSS:
+            return "LOSS";
+        case GameOutcome::DRAW:
+            return "DRAW";
+        case GameOutcome::NONE:
+            return "NONE";
+        default:
+        {
+            UNREACHABLE_CODE;
+            return "Breh";
+        }
+    }
+}
+
 void PrintGameState(const GameState &game_state, ostream &os)
 {
-#if defined(DEBUG_PRINT_GAME)
-    for (unsigned int row = 0; row < 3; ++row)
+    for (u32 row = 0; row < 3; ++row)
     {
-        for (unsigned int column = 0; column < 3; ++column)
+        for (u32 column = 0; column < 3; ++column)
         {
             Move inspected_move = static_cast<Move>(row * 3 + column);
-            auto player_it = game_state.move_to_player_map.find(inspected_move);
-            if (player_it != game_state.move_to_player_map.end())
+            Player player_that_made_move = game_state.move_to_player_map[inspected_move];
+            if (player_that_made_move != Player::NONE)
             {
-                Player player_that_made_move = player_it->second;
-                os << (player_that_made_move == Player::CIRCLE ? "O" : "X");
+                LOGN(os, (player_that_made_move == Player::CIRCLE ? "O" : "X"));
             }
             else
             {
-                os << ".";
+                LOGN(os, ".");
             }
-            os << " ";
+            LOGN(os, " ");
         }
-        os << endl;
+        LOG(os, "");
     }
-#endif
 }
 
-GameOutcome DetermineGameOutcome(const MoveToPlayerMap &move_to_player_map, Player previous_player)
+GameOutcome DetermineGameOutcome(GameState &game_state, Player previous_player)
 {
-    auto check_for_player_wincon = [&move_to_player_map](const MoveSequence& predicate_moves, Player predicate) {
-        return std::all_of(predicate_moves.begin(), predicate_moves.end(), [&](Move move) {
-            auto it = move_to_player_map.find(move);
-            return it != move_to_player_map.end() && it->second == predicate;
-        });
-    };
-    for (int row_orientation = 0; row_orientation < 2; ++row_orientation)
+    bool is_draw = true;
+    auto check_for_player_wincon = [&game_state, &is_draw](Move predicate_moves[3], Player predicate)
     {
-        int col_term = (row_orientation == 0 ? 3 : 1);
-        int row_term = (row_orientation == 0 ? 1 : 3);
-        for (int row_index = 0; row_index < 3; ++row_index)
+        for (u32 i = 0; i < 3; ++i)
         {
-            MoveSequence predicate_moves;
-            for (int column_index = 0; column_index < 3; ++column_index)
+            Player player = game_state.move_to_player_map[predicate_moves[i]];
+            if (player == Player::NONE)
             {
-                int move_index = row_term * row_index + col_term * column_index;
+                is_draw = false;
+            }
+            if (player != predicate)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    };
+
+    for (i32 row_orientation = 0; row_orientation < 2; ++row_orientation)
+    {
+        i32 col_term = (row_orientation == 0 ? 3 : 1);
+        i32 row_term = (row_orientation == 0 ? 1 : 3);
+        for (i32 row_index = 0; row_index < 3; ++row_index)
+        {
+            Move predicate_moves[3];
+            for (i32 column_index = 0; column_index < 3; ++column_index)
+            {
+                i32 move_index = row_term * row_index + col_term * column_index;
                 assert(move_index < Move::NONE);
-                predicate_moves.push_back(static_cast<Move>(move_index));
+                Move move = static_cast<Move>(move_index);
+                predicate_moves[column_index] = move;
             }
 
             // TODO: could check for all Player in one iteration, as if one symbol isn't the matched one, it automatically turns the corresponding boolean to false
@@ -169,16 +193,17 @@ GameOutcome DetermineGameOutcome(const MoveToPlayerMap &move_to_player_map, Play
     }
 
     // check diagonals
-    for (int direction = 0; direction < 2; ++direction)
+    for (i32 direction = 0; direction < 2; ++direction)
     {
-        int a = (direction == 0) ? 4 : 0;
-        int b = (direction == 0) ? 0 : 2;
-        MoveSequence predicate_moves;
-        for (int i = 0; i < 3; ++i)
+        i32 a = (direction == 0) ? 4 : 0;
+        i32 b = (direction == 0) ? 0 : 2;
+        Move predicate_moves[3] = {};
+        for (i32 i = 0; i < 3; ++i)
         {
-            int move_index = i * a + b * (i + 1);
+            i32 move_index = i * a + b * (i + 1);
             assert(move_index < Move::NONE);
-            predicate_moves.push_back(static_cast<Move>(move_index));
+            Move move = static_cast<Move>(move_index);
+            predicate_moves[i] = move;
         }
 
         if (check_for_player_wincon(predicate_moves, Player::CROSS))
@@ -190,8 +215,8 @@ GameOutcome DetermineGameOutcome(const MoveToPlayerMap &move_to_player_map, Play
             return previous_player == Player::CIRCLE ? GameOutcome::WIN : GameOutcome::LOSS;
         }
     }
-    
-    if (move_to_player_map.size() == Move::NONE)
+
+    if (is_draw)
     {
         return GameOutcome::DRAW;
     }
@@ -201,305 +226,439 @@ GameOutcome DetermineGameOutcome(const MoveToPlayerMap &move_to_player_map, Play
 
 void ProcessMove(MoveSet &available_moves, Move move)
 {
-    assert(available_moves.count(move));
-    available_moves.erase(move);
+    assert(available_moves.moves[move] != Move::NONE);
+    available_moves.moves[move] = Move::NONE;
+    --available_moves.moves_left;
 }
 
 bool g_should_write_out_simulation;
-ofstream g_write_out_for_simulation;
+ofstream g_simresult_fs;
 
-struct SimulationSubResult
+SimulationResult simulation_from_position_once(const MoveSequence &movesequence_from_position)
 {
-    double value;
-    Player last_player;
-};
-
-SimulationSubResult simulation_from_state_once(const MoveSequence &move_sequence_from_state)
-{
-    SimulationSubResult simulation_subresult = {};
+    SimulationResult simulation_result = {};
 
     GameState cur_world_state = g_game_state;
     Player player_that_needs_to_win = cur_world_state.player_to_move;
 
-#if defined(DEBUG_PRINT_OUT)
+#if defined(DEBUG_WRITE_OUT)
     if (g_should_write_out_simulation)
     {
-        g_write_out_for_simulation << "Player about to move: " << PlayerToWord(cur_world_state.player_to_move) << endl;
-        PrintGameState(cur_world_state, g_write_out_for_simulation);
-        g_write_out_for_simulation << "move sequence from state: ";
-        for (auto move : move_sequence_from_state)
+        LOG(g_simresult_fs, "Player about to move: " << PlayerToWord(cur_world_state.player_to_move));
+        PrintGameState(cur_world_state, g_simresult_fs);
+        LOGN(g_simresult_fs, "move sequence from state: ");
+        for (u32 movesequence_index = 0; movesequence_index < movesequence_from_position.number_of_moves; ++movesequence_index)
         {
-            g_write_out_for_simulation << MoveToWord(move) << " ";
+            Move move = movesequence_from_position.moves[movesequence_index];
+            assert(move != Move::NONE);
+            LOGN(g_simresult_fs, MoveToWord(move) << " ");
         }
-        g_write_out_for_simulation << endl;
+        LOG(g_simresult_fs, "");
     }
 #endif
 
-    Player previous_player = (cur_world_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
+    // NOTE(david): no randomness were involved, got a proper game out come exactly right after the move sequence was applied to the position
+    u32 movesequence_index = 0;
+    simulation_result.last_player_to_move = (cur_world_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
+    simulation_result.last_move.terminal_type = TerminalType::NEUTRAL;
+    simulation_result.last_move.controlled_type = ControlledType::UNCONTROLLED;
 
-    cur_world_state.outcome_for_previous_player = DetermineGameOutcome(cur_world_state.move_to_player_map, previous_player);
-    auto move_it = move_sequence_from_state.begin();
     // make moves to arrive at the position and simulate the rest of the game
+    cur_world_state.outcome_for_previous_player = DetermineGameOutcome(cur_world_state, simulation_result.last_player_to_move);
+    
     while (cur_world_state.outcome_for_previous_player == GameOutcome::NONE)
     {
         // make a move from the move chain
-        if (move_it != move_sequence_from_state.end())
+        if (movesequence_index < movesequence_from_position.number_of_moves)
         {
-            auto move = *move_it++;
-            assert(cur_world_state.move_to_player_map.count(move) == 0);
-            cur_world_state.move_to_player_map.insert({move, cur_world_state.player_to_move});
-            cur_world_state.legal_moveset.erase(move);
+            Move move = movesequence_from_position.moves[movesequence_index++];
+            assert(cur_world_state.move_to_player_map[move] == Player::NONE);
+            assert(cur_world_state.legal_moveset.moves[move] != Move::NONE);
+            assert(cur_world_state.legal_moveset.moves_left > 0);
+
+            cur_world_state.move_to_player_map[move] = cur_world_state.player_to_move;
+            cur_world_state.legal_moveset.moves[move] = Move::NONE;
+            --cur_world_state.legal_moveset.moves_left;
         }
         // generate a random move
         else
         {
-            assert(cur_world_state.legal_moveset.empty() == false && "if there aren't any more legal moves that means DetermineGameOutcome should have returned draw");
+            simulation_result.last_move.terminal_type = TerminalType::NOT_TERMINAL;
 
-            unsigned int random_move_offset = GetRandomNumber(0, cur_world_state.legal_moveset.size() - 1);
-            auto it = cur_world_state.legal_moveset.begin();
-            std::advance(it, random_move_offset);
-            cur_world_state.move_to_player_map.insert({*it, cur_world_state.player_to_move});
-            cur_world_state.legal_moveset.erase(it);
+            assert(cur_world_state.legal_moveset.moves_left > 0 && "if there aren't any more legal moves that means DetermineGameOutcome should have returned draw");
+
+            u32 random_move_offset = GetRandomNumber(0, cur_world_state.legal_moveset.moves_left - 1);
+            Move random_move = Move::NONE;
+            u32 random_move_index = 0;
+            for (u32 move_index = 0; move_index < ArrayCount(cur_world_state.legal_moveset.moves); ++move_index)
+            {
+                if (cur_world_state.legal_moveset.moves[move_index] != Move::NONE && random_move_offset-- == 0)
+                {
+                    random_move = cur_world_state.legal_moveset.moves[move_index];
+                    random_move_index = move_index;
+                    break ;
+                }
+            }
+            assert(random_move != Move::NONE);
+
+            cur_world_state.move_to_player_map[random_move] = cur_world_state.player_to_move;
+            cur_world_state.legal_moveset.moves[random_move_index] = Move::NONE;
+            --cur_world_state.legal_moveset.moves_left;
         }
 
-        previous_player = cur_world_state.player_to_move;
-        cur_world_state.outcome_for_previous_player = DetermineGameOutcome(cur_world_state.move_to_player_map, previous_player);
+        simulation_result.last_player_to_move = cur_world_state.player_to_move;
+        simulation_result.last_move.controlled_type = (simulation_result.last_player_to_move == player_that_needs_to_win ? ControlledType::CONTROLLED : ControlledType::UNCONTROLLED);
+
+        cur_world_state.outcome_for_previous_player = DetermineGameOutcome(cur_world_state, simulation_result.last_player_to_move);
 
         cur_world_state.player_to_move = (cur_world_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
     }
 
-#if defined(DEBUG_PRINT_OUT)
-    if (g_should_write_out_simulation)
-    {
-        g_write_out_for_simulation << "Player to move: " << PlayerToWord(cur_world_state.player_to_move) << endl;
-        PrintGameState(cur_world_state, g_write_out_for_simulation);
-        g_write_out_for_simulation << "Game outcome for previous player: " << GameOutcomeToWord(cur_world_state.outcome_for_previous_player) << endl;
-        g_write_out_for_simulation << "Previous player: " << PlayerToWord(previous_player) << endl;
-        g_write_out_for_simulation << "" << endl;
-    }
-#endif
-
-    simulation_subresult.last_player = previous_player;
+    simulation_result.last_player_to_move = simulation_result.last_player_to_move;
     switch (cur_world_state.outcome_for_previous_player)
     {
-        case GameOutcome::WIN: {
-            simulation_subresult.value = player_that_needs_to_win == previous_player ? 1.0 : -1.0;
-        } break ;
-        case GameOutcome::LOSS: {
-            simulation_subresult.value = player_that_needs_to_win == previous_player ? -1.0 : 1.0;
-        } break ;
-        case GameOutcome::DRAW: {
-            simulation_subresult.value = 0.0;
-        } break ;
+        // TODO(david): define a terminal interval for values, as there can be other values than winning and losing
+        // NOTE(david): maybe there is no winning/losing terminal type, only values
+        case GameOutcome::WIN:
+        {
+            simulation_result.total_value = player_that_needs_to_win == simulation_result.last_player_to_move ? 1.0 : -1.0;
+            if (simulation_result.last_move.terminal_type != TerminalType::NOT_TERMINAL)
+            {
+                simulation_result.last_move.terminal_type = player_that_needs_to_win == simulation_result.last_player_to_move ? TerminalType::WINNING : TerminalType::LOSING;
+            }
+        }
+        break;
+        case GameOutcome::LOSS:
+        {
+            simulation_result.total_value = player_that_needs_to_win == simulation_result.last_player_to_move ? -1.0 : 1.0;
+            if (simulation_result.last_move.terminal_type != TerminalType::NOT_TERMINAL)
+            {
+                simulation_result.last_move.terminal_type = player_that_needs_to_win == simulation_result.last_player_to_move ? TerminalType::LOSING : TerminalType::WINNING;
+            }
+        }
+        break;
+        case GameOutcome::DRAW:
+        {
+            simulation_result.total_value = 0.0;
+            if (simulation_result.last_move.terminal_type != TerminalType::NOT_TERMINAL)
+            {
+                simulation_result.last_move.terminal_type = TerminalType::NEUTRAL;
+            }
+        }
+        break;
         default:
         {
             UNREACHABLE_CODE;
         }
     }
 
-    return simulation_subresult;
+#if defined(DEBUG_WRITE_OUT)
+    if (g_should_write_out_simulation)
+    {
+        LOG(g_simresult_fs, "Player to move: " << PlayerToWord(cur_world_state.player_to_move));
+        PrintGameState(cur_world_state, g_simresult_fs);
+        LOG(g_simresult_fs, "Game outcome for previous player: " << GameOutcomeToWord(cur_world_state.outcome_for_previous_player));
+        LOG(g_simresult_fs, "Previous player: " << PlayerToWord(simulation_result.last_player_to_move));
+        LOG(g_simresult_fs, "TerminalType: " << TerminalTypeToWord(simulation_result.last_move.terminal_type));
+        LOG(g_simresult_fs, "ControlledType: " << ControlledTypeToWord(simulation_result.last_move.controlled_type));
+        LOG(g_simresult_fs, "");
+    }
+#endif
+
+    if (movesequence_index != movesequence_from_position.number_of_moves)
+    {
+        assert(movesequence_index == movesequence_from_position.number_of_moves && "still have moves to apply to the position from movesequence so the simulation can't end before that");
+    }
+
+    simulation_result.num_simulations = 1;
+
+    return simulation_result;
 }
 
-SimulationResult simulation_from_state(const MoveSequence &move_sequence_from_state)
+SimulationResult simulation_from_position(const MoveSequence &movesequence_from_position)
 {
+    assert(movesequence_from_position.number_of_moves > 0 && "must have at least one move to apply to the position");
+
     SimulationResult simulation_result = {};
+    simulation_result.last_move.terminal_type = TerminalType::NOT_TERMINAL;
+    simulation_result.last_move.controlled_type = ControlledType::NONE;
 
     g_should_write_out_simulation = true;
 
-#if defined(DEBUG_PRINT_OUT)
-    static unsigned int sim_counter = 0;
-    g_write_out_for_simulation = ofstream("debug/sim_result" + to_string(sim_counter++));
+#if defined(DEBUG_WRITE_OUT)
+    static u32 sim_counter = 0;
+    g_simresult_fs = ofstream("debug/sim_results/sim_result" + to_string(sim_counter++));
 #endif
 
     // choose the number of simulations based on the number of possible moves
-    unsigned int number_of_moves_available_from_position = g_game_state.legal_moveset.size() - move_sequence_from_state.size();
-    unsigned int number_of_simulations_weight = number_of_moves_available_from_position;
-    unsigned int number_of_simulations = 15 * number_of_simulations_weight;
-    if (number_of_moves_available_from_position == 0)
-    {
-        // NOTE(david): if it's a terminal state, only need to do 1 simulation
-        number_of_simulations = 1;
-        simulation_result.last_move.was_terminal = true;
-    }
-    simulation_result.num_simulations = number_of_simulations;
-    assert(number_of_simulations > 0);
-    for (unsigned int current_simulation_count = 0;
+    assert(g_game_state.legal_moveset.moves_left >= movesequence_from_position.number_of_moves);
+    u32 number_of_moves_available_from_position = g_game_state.legal_moveset.moves_left - movesequence_from_position.number_of_moves;
+    u32 number_of_simulations_weight = number_of_moves_available_from_position * 15;
+    u32 number_of_simulations = max((u32)1, (u32)(number_of_simulations_weight));
+    // NOTE(david): it will be a terminal move, but it hasn't yet been simulated
+    assert(number_of_simulations > 0 && "assumption, debug to make sure this is true, for example get the selected node and check if it is not terminal yet at this point");
+    for (u32 current_simulation_count = 0;
          current_simulation_count < number_of_simulations;
          ++current_simulation_count)
     {
-        SimulationSubResult simulation_subresult = simulation_from_state_once(move_sequence_from_state);
-        simulation_result.last_move.was_controlled = (g_game_state.player_to_move == simulation_subresult.last_player);
-        
-        simulation_result.total_value += simulation_subresult.value;
+        SimulationResult simulation_result_for_one_simulation = simulation_from_position_once(movesequence_from_position);
 
-#if defined(DEBUG_PRINT_OUT)
-        g_write_out_for_simulation << simulation_subresult.value << " ";
+        simulation_result.last_move = simulation_result_for_one_simulation.last_move;
+        simulation_result.last_player_to_move = simulation_result_for_one_simulation.last_player_to_move;
+        simulation_result.total_value += simulation_result_for_one_simulation.total_value;
+        assert(simulation_result_for_one_simulation.num_simulations == 1);
+        simulation_result.num_simulations += simulation_result_for_one_simulation.num_simulations;
+
+#if defined(DEBUG_WRITE_OUT)
+        LOGN(g_simresult_fs, simulation_result_for_one_simulation.total_value << " ");
         g_should_write_out_simulation = false;
 #endif
+
+        if (simulation_result_for_one_simulation.last_move.terminal_type != TerminalType::NOT_TERMINAL)
+        {
+            simulation_result.num_simulations = max((u32)1, (u32)(number_of_simulations_weight));
+
+            simulation_result.total_value = simulation_result_for_one_simulation.total_value * simulation_result.num_simulations;
+            assert(simulation_result.num_simulations > 0);
+
+            assert(current_simulation_count == 0);
+            break;
+        }
     }
 
-#if defined(DEBUG_PRINT_OUT)
-    g_write_out_for_simulation << endl;
+#if defined(DEBUG_WRITE_OUT)
+    LOG(g_simresult_fs, "");
 #endif
 
     return simulation_result;
 }
 
-UtilityEstimationResult utility_estimator(const MoveSequence &move_sequence_from_state)
+struct GameSummary
 {
-    UtilityEstimationResult utility_estimation_result = {};
+    GameOutcome outcome;
+    u32 number_of_simulations;
+    u32 number_of_moves;
+};
 
-    // TODO(david): implement heuristic evaluations for the game
-
-    utility_estimation_result.should_prune = false;
-
-    return utility_estimation_result;
-}
-
-GameOutcome play_one_game(Player player_to_win)
+GameSummary play_one_game(Player player_to_win, NodePool &node_pool)
 {
+    GameSummary summary = {};
+    summary.outcome = GameOutcome::NONE;
+
     g_game_state = {};
-
     g_game_state.player_to_move = player_to_win;
-    g_game_state.outcome_for_previous_player = GameOutcome::NONE;
-    for (unsigned int row_index = 0; row_index < Move::NONE; ++row_index)
+    for (u32 move_index = 0; move_index < Move::NONE; ++move_index)
     {
-        g_game_state.legal_moveset.insert(static_cast<Move>(row_index));
+        g_game_state.move_to_player_map[move_index] = Player::NONE;
+        Move move = static_cast<Move>(move_index);
+        g_game_state.legal_moveset.moves[move] = move;
+        ++g_game_state.legal_moveset.moves_left;
     }
+
+#if defined(DEBUG_WRITE_OUT)
+    static u32 playout_counter = 0;
+    ofstream playout_fs("debug/playouts/playout" + to_string(playout_counter++));
+#endif
 
     constexpr auto max_evaluation_time = 500ms;
     auto start_time = std::chrono::steady_clock::now();
 
+    Player previous_player = g_game_state.player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE;
+    g_game_state.outcome_for_previous_player = DetermineGameOutcome(g_game_state, previous_player);
     while (g_game_state.outcome_for_previous_player == GameOutcome::NONE)
     {
-        MCST mcst;
+        MCST mcst(node_pool);
         Move selected_move;
-        unsigned int number_of_simulations_ran = 0;
         bool should_terminate_simulation = false;
-        // NOTE(david): use the concept of confidence interval instead of this?
-        double prune_treshhold_for_node = -1.0;
+        bool stop_parent_sleep = false;
+        u32 number_of_simulations_ran = 0;
+        // TODO(david): use the concept of confidence interval instead of this?
+        // NOTE(david): not using prune_treshhold_for_node anymore as a node which is terminal should be pruned regardless of a threshhold
+        // r64 prune_treshhold_for_node = -1.0;
         thread t([&]() {
             try
             {
-                selected_move = mcst.Evaluate(g_game_state.legal_moveset, [&](){
+                selected_move = mcst.Evaluate(g_game_state.legal_moveset, [&](bool found_perfect_move){
+                    if (found_perfect_move)
+                    {
+                        stop_parent_sleep = true;
+                        return true;
+                    }
                     return should_terminate_simulation;
-                }, simulation_from_state, ProcessMove, utility_estimator, prune_treshhold_for_node);
+                }, simulation_from_position, ProcessMove, node_pool);
                 number_of_simulations_ran = mcst.NumberOfSimulationsRan();
             }
             catch (exception &e)
             {
-                LOG(e.what());
+                LOG(cerr, e.what());
                 exit(1);
             }
         });
         while (std::chrono::steady_clock::now() - start_time < max_evaluation_time)
         {
+            if (stop_parent_sleep)
+            {
+                break;
+            }
             this_thread::sleep_for(1ms);
         }
         should_terminate_simulation = true;
         t.join();
 
+        summary.number_of_simulations += number_of_simulations_ran;
 
         // play the move
         if (selected_move != Move::NONE)
         {
-            g_game_state.legal_moveset.erase(selected_move);
-            assert(g_game_state.move_to_player_map.count(selected_move) == 0);
-            g_game_state.move_to_player_map.insert({selected_move, g_game_state.player_to_move});
+            ++summary.number_of_moves;
+            assert(g_game_state.legal_moveset.moves[selected_move] != Move::NONE);
+            g_game_state.legal_moveset.moves[selected_move] = Move::NONE;
+            --g_game_state.legal_moveset.moves_left;
+
+            assert(g_game_state.move_to_player_map[selected_move] == Player::NONE);
+            g_game_state.move_to_player_map[selected_move] = g_game_state.player_to_move;
         }
 
-        g_game_state.outcome_for_previous_player = DetermineGameOutcome(g_game_state.move_to_player_map, g_game_state.player_to_move);
+        previous_player = g_game_state.player_to_move;
+        g_game_state.outcome_for_previous_player = DetermineGameOutcome(g_game_state, previous_player);
 
-#if defined(DEBUG_PRINT_GAME)
-        LOG(PlayerToWord(g_game_state.player_to_move) << " moves " << MoveToWord(selected_move) << ", number of simulations ran: " << number_of_simulations_ran << ", move counter: " << g_move_counter);
+#if defined(DEBUG_PRINT)
+        LOG(cout, PlayerToWord(previous_player) << " moves " << MoveToWord(selected_move) << ", number of simulations ran: " << number_of_simulations_ran << ", move counter: " << g_move_counter);
         PrintGameState(g_game_state, cout);
-        LOG("");
-        LOG("");
+        LOG(cout, "");
+        LOG(cout, "");
 #endif
+#if defined(DEBUG_WRITE_OUT)
+        LOG(playout_fs, PlayerToWord(previous_player) << " moves " << MoveToWord(selected_move) << ", number of simulations ran: " << number_of_simulations_ran << ", move counter: " << g_move_counter);
+        PrintGameState(g_game_state, playout_fs);
+        LOG(playout_fs, "");
+        LOG(playout_fs, "");
+#endif
+
+        ++g_move_counter;
 
         switch (g_game_state.outcome_for_previous_player)
         {
-            case GameOutcome::WIN:
-            {
-#if defined(DEBUG_PRINT_GAME)
-                LOG("Game over, player " << PlayerToWord(g_game_state.player_to_move) << " has won!");
+            case GameOutcome::WIN: {
+
+#if defined(DEBUG_PRINT)
+                LOG(cout, "Game over, player " << PlayerToWord(previous_player) << " has won!");
 #endif
-            }
-            break;
-            case GameOutcome::LOSS:
-            {
-#if defined(DEBUG_PRINT_GAME)
-                LOG("Game over, player " << PlayerToWord(g_game_state.player_to_move) << " has won!");
+
+#if defined(DEBUG_WRITE_OUT)
+                LOG(playout_fs, "Game over, player " << PlayerToWord(previous_player) << " has won!");
 #endif
-            }
-            break;
-            case GameOutcome::DRAW:
-            {
-#if defined(DEBUG_PRINT_GAME)
-                LOG("Game over, it's a draw!");
+
+            } break;
+            case GameOutcome::LOSS: {
+
+#if defined(DEBUG_PRINT)
+                LOG(cout, "Game over, player " << PlayerToWord(previous_player) << " has won!");
 #endif
-            }
-            break;
-            case GameOutcome::NONE:
-            {
+
+#if defined(DEBUG_WRITE_OUT)
+                LOG(playout_fs, "Game over, player " << PlayerToWord(previous_player) << " has won!");
+#endif
+
+            } break;
+            case GameOutcome::DRAW: {
+
+#if defined(DEBUG_PRINT)
+                LOG(cout, "Game over, it's a draw!");
+#endif
+
+#if defined(DEBUG_WRITE_OUT)
+                LOG(playout_fs, "Game over, it's a draw!");
+#endif
+
+            } break;
+            case GameOutcome::NONE: {
                 g_game_state.player_to_move = g_game_state.player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE;
-                ++g_move_counter;
                 start_time = std::chrono::steady_clock::now();
+            } break ;
+            default: {
+                UNREACHABLE_CODE;
             }
-            break;
         }
     }
 
     switch (g_game_state.outcome_for_previous_player)
     {
         case GameOutcome::WIN: {
-            return (player_to_win == g_game_state.player_to_move ? GameOutcome::WIN : GameOutcome::LOSS);
+            summary.outcome = player_to_win == previous_player ? GameOutcome::WIN : GameOutcome::LOSS;
         }
         break;
         case GameOutcome::LOSS: {
-            return (player_to_win == g_game_state.player_to_move ? GameOutcome::LOSS : GameOutcome::WIN);
+            summary.outcome = player_to_win == previous_player ? GameOutcome::LOSS : GameOutcome::WIN;
         }
         break;
         case GameOutcome::DRAW: {
-            return GameOutcome::DRAW;
+            summary.outcome = GameOutcome::DRAW;
         }
         break;
         default: {
             UNREACHABLE_CODE;
-            return GameOutcome::NONE;
         }
     }
+
+    return summary;
 }
 
-int main()
+i32 main()
 {
-    ofstream game_outcome_fs("debug/outcomes", ios_base::app);
-    unsigned int number_of_games = 100000;
-    unsigned int number_of_wins = 0;
-    unsigned int number_of_losses = 0;
-    unsigned int number_of_draws = 0;
-    for (unsigned int current_game_count = 1;
+#if defined(DEBUG_WRITE_OUT)
+    ofstream game_outcome_fs("debug/game_summary", ios_base::out | ios::trunc);
+#endif
+
+    constexpr NodeIndex node_pool_size = 8192;
+    NodePool node_pool(node_pool_size);
+
+    constexpr u32 number_of_games = 100000;
+    u32 number_of_wins = 0;
+    u32 number_of_losses = 0;
+    u32 number_of_draws = 0;
+    for (u32 current_game_count = 1;
          current_game_count <= number_of_games;
          ++current_game_count)
     {
         gen.seed(current_game_count);
-        GameOutcome outcome = play_one_game(Player::CIRCLE);
-        switch (outcome)
+        r64 reward_for_reinforced_learning = 0.0;
+        GameSummary summary = play_one_game(Player::CIRCLE, node_pool);
+        switch (summary.outcome)
         {
-            case GameOutcome::WIN: {
+            case GameOutcome::WIN:
+            {
+                reward_for_reinforced_learning = 1.0;
                 ++number_of_wins;
-            } break ;
-            case GameOutcome::LOSS: {
+            }
+            break;
+            case GameOutcome::LOSS:
+            {
+                reward_for_reinforced_learning = -1.0;
                 ++number_of_losses;
-            } break ;
-            case GameOutcome::DRAW: {
+            }
+            break;
+            case GameOutcome::DRAW:
+            {
+                reward_for_reinforced_learning = 0.0;
                 ++number_of_draws;
-            } break ;
-            default: {
+            }
+            break;
+            default:
+            {
                 UNREACHABLE_CODE;
             }
         }
-        LOG("Wins: " << number_of_wins << ", Losses: " << number_of_losses << ", Draws: " << number_of_draws << ", Total games played: " << current_game_count);
-        game_outcome_fs << GameOutcomeToWord(outcome) << endl;
+        static constexpr r64 alpha = 0.01;
+        static constexpr r64 gamma = 0.99;
+
+        // g_tuned_exploration_factor_weight = (1.0 - alpha) * g_tuned_exploration_factor_weight + alpha * (reward_for_reinforced_learning + gamma * g_tuned_exploration_factor_weight);
+        LOG(cout, "Wins: " << number_of_wins << ", Losses: " << number_of_losses << ", Draws: " << number_of_draws << ", Total games played: " << current_game_count);
+        // TODO(david): write out outcomes
+#if defined(DEBUG_WRITE_OUT)
+        LOG(game_outcome_fs, "Number of simulations: " << summary.number_of_simulations << ", number of moves: " << summary.number_of_moves << ", average number of simulations per move: " << (r64)summary.number_of_simulations / (r64)summary.number_of_moves << ", outcome: " << GameOutcomeToWord(summary.outcome));
+#endif
+        LOG(cout, "Number of simulations: " << summary.number_of_simulations << ", number of moves: " << summary.number_of_moves << ", average number of simulations per move: " << (r64)summary.number_of_simulations / (r64)summary.number_of_moves << ", outcome: " << GameOutcomeToWord(summary.outcome));
+        LOG(cout, "g_tuned_exploration_factor_weight: " << g_tuned_exploration_factor_weight);
     }
 }

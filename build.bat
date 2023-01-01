@@ -16,8 +16,11 @@ set CreateDLLWithDebug=/LDd
 set CreateDLL=/LD
 set CVersion=/std:c++17
 
+REM %MaximizeSpeed%
+
 set DebugCompilerFlags=%GenerateIntrinsicFunctions%^
                        %EnhanceOptimizedDebugging%^
+                       %MaximizeSpeed%^
                        %FullSmbolicDebuggingInformation%^
                        %NoLogo%^
                        %EnableStandardCStackUnwinding%^
