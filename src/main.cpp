@@ -261,7 +261,7 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
     u32 movesequence_index = 0;
     simulation_result.last_player_to_move = (cur_world_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
     simulation_result.last_move.terminal_type = TerminalType::NEUTRAL;
-    simulation_result.last_move.controlled_type = ControlledType::UNCONTROLLED;
+    simulation_result.last_move.controlled_type = (simulation_result.last_player_to_move == player_that_needs_to_win ? ControlledType::CONTROLLED : ControlledType::UNCONTROLLED);
 
     // make moves to arrive at the position and simulate the rest of the game
     cur_world_state.outcome_for_previous_player = DetermineGameOutcome(cur_world_state, simulation_result.last_player_to_move);
@@ -393,8 +393,9 @@ SimulationResult simulation_from_position(const MoveSequence &movesequence_from_
     // choose the number of simulations based on the number of possible moves
     assert(g_game_state.legal_moveset.moves_left >= movesequence_from_position.number_of_moves);
     u32 number_of_moves_available_from_position = g_game_state.legal_moveset.moves_left - movesequence_from_position.number_of_moves;
-    u32 number_of_simulations_weight = number_of_moves_available_from_position * 15;
-    u32 number_of_simulations = max((u32)1, (u32)(number_of_simulations_weight));
+    u32 number_of_simulations_weight = number_of_moves_available_from_position;
+    u32 number_of_simulations = 1;
+    // u32 number_of_simulations = max((u32)1, (u32)(number_of_simulations_weight));
     // NOTE(david): it will be a terminal move, but it hasn't yet been simulated
     assert(number_of_simulations > 0 && "assumption, debug to make sure this is true, for example get the selected node and check if it is not terminal yet at this point");
     for (u32 current_simulation_count = 0;
@@ -416,7 +417,8 @@ SimulationResult simulation_from_position(const MoveSequence &movesequence_from_
 
         if (simulation_result_for_one_simulation.last_move.terminal_type != TerminalType::NOT_TERMINAL)
         {
-            simulation_result.num_simulations = max((u32)1, (u32)(number_of_simulations_weight));
+            // simulation_result.num_simulations = max((u32)1, (u32)(number_of_simulations_weight));
+            simulation_result.num_simulations = 1;
 
             simulation_result.total_value = simulation_result_for_one_simulation.total_value * simulation_result.num_simulations;
             assert(simulation_result.num_simulations > 0);
@@ -460,7 +462,7 @@ GameSummary play_one_game(Player player_to_win, NodePool &node_pool)
     ofstream playout_fs("debug/playouts/playout" + to_string(playout_counter++));
 #endif
 
-    constexpr auto max_evaluation_time = 500ms;
+    constexpr auto max_evaluation_time = 1000000ms;
     auto start_time = std::chrono::steady_clock::now();
 
     Player previous_player = g_game_state.player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE;
@@ -606,11 +608,9 @@ GameSummary play_one_game(Player player_to_win, NodePool &node_pool)
 
 i32 main()
 {
-#if defined(DEBUG_WRITE_OUT)
     ofstream game_outcome_fs("debug/game_summary", ios_base::out | ios::trunc);
-#endif
 
-    constexpr NodeIndex node_pool_size = 8192;
+    constexpr NodeIndex node_pool_size = 65536;
     NodePool node_pool(node_pool_size);
 
     constexpr u32 number_of_games = 100000;
@@ -654,11 +654,10 @@ i32 main()
 
         // g_tuned_exploration_factor_weight = (1.0 - alpha) * g_tuned_exploration_factor_weight + alpha * (reward_for_reinforced_learning + gamma * g_tuned_exploration_factor_weight);
         LOG(cout, "Wins: " << number_of_wins << ", Losses: " << number_of_losses << ", Draws: " << number_of_draws << ", Total games played: " << current_game_count);
-        // TODO(david): write out outcomes
-#if defined(DEBUG_WRITE_OUT)
+
         LOG(game_outcome_fs, "Number of simulations: " << summary.number_of_simulations << ", number of moves: " << summary.number_of_moves << ", average number of simulations per move: " << (r64)summary.number_of_simulations / (r64)summary.number_of_moves << ", outcome: " << GameOutcomeToWord(summary.outcome));
-#endif
+
         LOG(cout, "Number of simulations: " << summary.number_of_simulations << ", number of moves: " << summary.number_of_moves << ", average number of simulations per move: " << (r64)summary.number_of_simulations / (r64)summary.number_of_moves << ", outcome: " << GameOutcomeToWord(summary.outcome));
-        LOG(cout, "g_tuned_exploration_factor_weight: " << g_tuned_exploration_factor_weight);
+        // LOG(cout, "g_tuned_exploration_factor_weight: " << g_tuned_exploration_factor_weight);
     }
 }

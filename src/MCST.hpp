@@ -26,6 +26,7 @@ struct TerminalInfo
 {
     TerminalType terminal_type;
     ControlledType controlled_type; // TODO(david): this is not terminal information, it's about who controls the specific node to move from, move this into node
+    u16 terminal_depth; // NOTE(david): this refers to the max depth when the node first found to be  terminal, which then propagates back to find in how many moves does it take to reach terminal game state
 };
 
 // TODO(david): can this be just a node instead and the simulation will update its values?
@@ -48,10 +49,11 @@ using MoveProcessor = function<void(MoveSet &available_moves, Move move)>;
 using SimulateFromState = function<SimulationResult(const MoveSequence &move_chain_from_world_state)>;
 using TerminationPredicate = function<bool(bool found_perfect_move)>;
 
-typedef i16 NodeIndex;
+// NOTE(david): must be signed
+typedef i32 NodeIndex;
 struct Node
 {
-    r32 value;
+    r64 value;
     u32 num_simulations;
 
     NodeIndex index;
@@ -60,6 +62,8 @@ struct Node
     TerminalInfo terminal_info;
 
     Move move_to_get_here;
+
+    u16 depth;
 };
 
 class NodePool
@@ -117,7 +121,7 @@ private:
     };
 
     SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, MoveProcessor move_processor, NodePool &node_pool);
-    Node *_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, const MoveSequence &movesequence_from_position, u32 depth, bool focus_on_lowest_utc_to_prune, NodePool &node_pool);
+    Node *_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, const MoveSequence &movesequence_from_position, bool focus_on_lowest_utc_to_prune, NodePool &node_pool);
     Node *_Expansion(Node *from_node, NodePool &node_pool);
     void _BackPropagate(Node *from_node, SimulationResult simulation_result, NodePool &node_pool);
 
