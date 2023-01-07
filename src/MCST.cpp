@@ -86,7 +86,7 @@ static string ControlledTypeToWord(ControlledType controlled_type)
 
 ostream &operator<<(ostream &os, const Node *node)
 {
-    LOG(os, MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", index: " << node->index << ", sims: " << node->num_simulations << ", parent: " << node->parent << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", " << ControlledTypeToWord(node->controlled_type));
+    LOGN(os, MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", index: " << node->index << ", sims: " << node->num_simulations << ", parent: " << node->parent << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", " << ControlledTypeToWord(node->controlled_type));
 
     return os;
 }
@@ -226,7 +226,7 @@ NodePool::MoveToNodeTable *NodePool::GetChildren(Node *node)
     return &_move_to_node_tables[node->index];
 }
 
-Node *NodePool::GetParent(Node *node)
+Node *NodePool::GetParent(Node *node) const
 {
     Node *parent_node = nullptr;
 
@@ -499,56 +499,32 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
                 // NOTE(david): if root node is a terminal node, it means that no more simulations are needed
                 termination_predicate(true);
                 break ;
-                // return winning_move_selection_strategy_fn(_root_node, legal_moveset_at_root_node, node_pool);
             }
 
-            SimulationResult simulation_result = {};
+// #if defined(DEBUG_WRITE_OUT)
+//             DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter, node_pool);
+// #endif
 
-            simulation_result.total_value = selection_result.selected_node->value;
-            simulation_result.num_simulations = selection_result.selected_node->num_simulations;
-            if (simulation_result.num_simulations > 10000000)
+        }
+        else
+        {
+            TIMED_BLOCK("simulation_from_state", simulation_from_state(selection_result.movesequence_from_position, game_state, selection_result.selected_node, node_pool));
+            // simulation_from_state(selection_result.movesequence_from_position, selection_result.selected_node, node_pool);
+            simulation_cycles_total += g_clock_cycles_var;
+            ++simulation_cycles_count;
+
+            if (selection_result.selected_node->num_simulations > 10000000)
             {
 #if defined(DEBUG_WRITE_OUT)
     DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter, node_pool, game_state);
 #endif
                 assert(false && "suspicious amount of simulations, make sure this could happen");
             }
-            simulation_result.last_move.terminal_type = selection_result.selected_node->terminal_info.terminal_type;
-            // NOTE(david): it's weird that the controlled type for the simulation result is the opposite of the controlled type of the node. The reason why this is true, because the simulation returns the controlled type of the previous node's selected move and the controlled type is associated with that node. However there is one more node after that, the node which the move has arrived to, which is the selected_node/from_node
-            simulation_result.last_controlled_type = selection_result.selected_node->controlled_type == ControlledType::CONTROLLED ? ControlledType::UNCONTROLLED : ControlledType::CONTROLLED;
-
-            TIMED_BLOCK("_BackPropagate", _BackPropagate(selection_result.selected_node, simulation_result, node_pool));
-            // _BackPropagate(selection_result.selected_node, simulation_result, node_pool);
-            backpropagate_cycles_total += g_clock_cycles_var;
-            ++backpropagate_cycles_count;
-
-// #if defined(DEBUG_WRITE_OUT)
-//             DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter, node_pool);
-// #endif
-
-            // return winning_move_selection_strategy_fn(_root_node, legal_moveset_at_root_node, node_pool);
-
         }
-        else
-        {
-            TIMED_BLOCK("simulation_from_state", SimulationResult simulation_result = simulation_from_state(selection_result.movesequence_from_position, game_state));
-            // SimulationResult simulation_result = simulation_from_state(selection_result.movesequence_from_position);
-            simulation_cycles_total += g_clock_cycles_var;
-            ++simulation_cycles_count;
+        TIMED_BLOCK("_BackPropagate", _BackPropagate(selection_result.selected_node, node_pool));
+        backpropagate_cycles_total += g_clock_cycles_var;
+        ++backpropagate_cycles_count;
 
-            if (simulation_result.num_simulations > 10000000)
-            {
-#if defined(DEBUG_WRITE_OUT)
-    DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter, node_pool);
-#endif
-                assert(false && "suspicious amount of simulations, make sure this could happen");
-            }
-
-            TIMED_BLOCK("_BackPropagate", _BackPropagate(selection_result.selected_node, simulation_result, node_pool));
-            // _BackPropagate(selection_result.selected_node, simulation_result, node_pool);
-            backpropagate_cycles_total += g_clock_cycles_var;
-            ++backpropagate_cycles_count;
-        }
         ++EvaluateIterations;
     }
     LOG(cout, "Evaluate iterations: " << EvaluateIterations << ", total: " << selection_cycles_total + backpropagate_cycles_total + simulation_cycles_total << "M");
@@ -557,7 +533,7 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
     LOG(cout, "Simulation total cycles: " << simulation_cycles_total << "M");
 
 #if defined(DEBUG_WRITE_OUT)
-    DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter, node_pool);
+    DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter, node_pool, game_state);
 #endif
 
     // TIMED_BLOCK("winning_move_selection_strategy_fn", Move result_move = winning_move_selection_strategy_fn(_root_node, legal_moveset_at_root_node, node_pool));
@@ -933,39 +909,35 @@ Node *MCST::_Expansion(Node *from_node, NodePool &node_pool)
     return result;
 }
 
-void MCST::_BackPropagate(Node *from_node, SimulationResult simulation_result, NodePool &node_pool)
+void MCST::_BackPropagate(Node *from_node, NodePool &node_pool)
 {
     assert(from_node != _root_node && "root node is not a valid move so it couldn't have been simulated");
     assert(_root_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
 
-    if (simulation_result.last_move.terminal_type != TerminalType::NOT_TERMINAL)
+    if (from_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
     {
-        from_node->terminal_info.terminal_type = simulation_result.last_move.terminal_type;
-
-        assert(from_node->controlled_type != simulation_result.last_controlled_type && "from_node is the node of the last move, which should be the opposite as simulation result's controlled type, the reason why this is true, because the simulation returns the controlled type of the previous node's selected move and the controlled type is associated with that node. However there is one more node after that, the node which the move has arrived to, which is the selected_node/from_node");
-
         Node *parent_node = node_pool.GetParent(from_node);
-        assert(parent_node != nullptr && "from_node can't be root to propagate back from, as if it was terminal we should have already returned an evaluation result");
+        assert(parent_node != nullptr && "node can't be root to propagate back from, as if it was terminal we should have already returned an evaluation result");
 
         // TODO(david): add terminal move info rule table maybe
-        if (simulation_result.last_controlled_type == ControlledType::CONTROLLED && simulation_result.last_move.terminal_type == TerminalType::WINNING)
+        if (from_node->controlled_type == ControlledType::UNCONTROLLED && from_node->terminal_info.terminal_type == TerminalType::WINNING)
         {
-            parent_node->terminal_info.terminal_type = simulation_result.last_move.terminal_type;
+            parent_node->terminal_info.terminal_type = from_node->terminal_info.terminal_type;
         }
-        if (simulation_result.last_controlled_type == ControlledType::UNCONTROLLED && simulation_result.last_move.terminal_type == TerminalType::LOSING)
+        if (from_node->controlled_type == ControlledType::CONTROLLED && from_node->terminal_info.terminal_type == TerminalType::LOSING)
         {
-            parent_node->terminal_info.terminal_type = simulation_result.last_move.terminal_type;
+            parent_node->terminal_info.terminal_type = from_node->terminal_info.terminal_type;
         }
     }
 
-    Node *cur_node = from_node;
+    Node *cur_node = node_pool.GetParent(from_node);
     while (cur_node != nullptr)
     {
-        // TODO(david): add backpropagating rules terminal rules here? (as seen above this loop)
-        cur_node->num_simulations += simulation_result.num_simulations;
-        cur_node->value += simulation_result.total_value;
-        Node *parent_node = node_pool.GetParent(cur_node);
-        cur_node = parent_node;
+        // TODO(david): add backpropagating rules terminal rules here?
+        cur_node->num_simulations += from_node->num_simulations;
+        cur_node->value += from_node->value;
+
+        cur_node = node_pool.GetParent(cur_node);
     }
 }
 

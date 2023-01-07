@@ -30,14 +30,14 @@ struct TerminalInfo
 };
 
 // TODO(david): can this be just a node instead and the simulation will update its values?
-struct SimulationResult
-{
-    u32 num_simulations;
-    r64 total_value;
-    TerminalInfo last_move;
-    ControlledType last_controlled_type;
-    Player last_player_to_move;
-};
+// struct SimulationResult
+// {
+//     u32 num_simulations;
+//     r64 total_value;
+//     TerminalInfo last_move;
+//     ControlledType last_controlled_type;
+//     Player last_player_to_move;
+// };
 
 // using MoveSequence: vector<Move> -> { Move[Move::NONE], u32 }
 struct MoveSequence
@@ -45,10 +45,6 @@ struct MoveSequence
     Move moves[Move::NONE];
     u32 number_of_moves;
 };
-
-using MoveProcessor = function<void(MoveSet &available_moves, Move move)>;
-using SimulateFromState = function<SimulationResult(const MoveSequence &move_chain_from_world_state, const GameState &game_state)>;
-using TerminationPredicate = function<bool(bool found_perfect_move)>;
 
 // NOTE(david): must be signed
 typedef i32 NodeIndex;
@@ -58,6 +54,7 @@ struct Node
     u32 num_simulations;
 
     NodeIndex index;
+    // TODO(david): maybe it makes sense to store the parent as a pointer to give up some extra space in order to avoid the extra lookup through NodePool
     NodeIndex parent;
 
     ControlledType controlled_type;
@@ -95,11 +92,15 @@ public:
     void AddChild(Node *node, Node *child, Move move);
     Node *GetChild(Node *node, Move move);
     MoveToNodeTable *GetChildren(Node *node);
-    Node *GetParent(Node *node);
+    Node *GetParent(Node *node) const;
     Node *SetParent(Node *node, Node *parent);
 
     void Clear();
 };
+
+using MoveProcessor = function<void(MoveSet &available_moves, Move move)>;
+using SimulateFromState = function<void(const MoveSequence &move_chain_from_world_state, const GameState &game_state, Node *node, const NodePool &node_pool)>;
+using TerminationPredicate = function<bool(bool found_perfect_move)>;
 
 class MCST
 {
@@ -125,7 +126,7 @@ private:
     SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, MoveProcessor move_processor, NodePool &node_pool);
     Node *_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, const MoveSequence &movesequence_from_position, bool focus_on_lowest_utc_to_prune, NodePool &node_pool);
     Node *_Expansion(Node *from_node, NodePool &node_pool);
-    void _BackPropagate(Node *from_node, SimulationResult simulation_result, NodePool &node_pool);
+    void _BackPropagate(Node *from_node, NodePool &node_pool);
 
     using WinningMoveSelectionStrategy = function<Move(Node *from_node, const MoveSet &legal_moves_at_root_node, NodePool &node_pool)>;
     WinningMoveSelectionStrategy winning_move_selection_strategy_fn;

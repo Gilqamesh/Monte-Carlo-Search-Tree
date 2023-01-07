@@ -258,10 +258,8 @@ void ProcessMove(MoveSet &available_moves, Move move)
 bool g_should_write_out_simulation;
 ofstream g_simresult_fs;
 
-SimulationResult simulation_from_position_once(const MoveSequence &movesequence_from_position, const GameState &game_state)
+void simulation_from_position_once(const MoveSequence &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
 {
-    SimulationResult simulation_result = {};
-
     GameState cur_game_state = game_state;
     Player player_that_needs_to_win = cur_game_state.player_to_move;
 
@@ -283,13 +281,12 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
 
     // NOTE(david): no randomness were involved, got a proper game out come exactly right after the move sequence was applied to the position
     u32 movesequence_index = 0;
-    simulation_result.last_player_to_move = (cur_game_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
-    simulation_result.last_move.terminal_type = TerminalType::NEUTRAL;
-    simulation_result.last_controlled_type = (simulation_result.last_player_to_move == player_that_needs_to_win ? ControlledType::CONTROLLED : ControlledType::UNCONTROLLED);
+    Player last_player_to_move = (cur_game_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
+    TerminalType last_move_terminal_type = TerminalType::NEUTRAL;
 
     // make moves to arrive at the position and simulate the rest of the game
-    cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, simulation_result.last_player_to_move);
-    
+    cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, last_player_to_move);
+
     while (cur_game_state.outcome_for_previous_player == GameOutcome::NONE)
     {
         // make a move from the move chain
@@ -307,7 +304,7 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
         // generate a random move
         else
         {
-            simulation_result.last_move.terminal_type = TerminalType::NOT_TERMINAL;
+            last_move_terminal_type = TerminalType::NOT_TERMINAL;
 
             assert(cur_game_state.legal_moveset.moves_left > 0 && "if there aren't any more legal moves that means DetermineGameOutcome should have returned draw");
 
@@ -330,43 +327,42 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
             --cur_game_state.legal_moveset.moves_left;
         }
 
-        simulation_result.last_player_to_move = cur_game_state.player_to_move;
-        simulation_result.last_controlled_type = (simulation_result.last_player_to_move == player_that_needs_to_win ? ControlledType::CONTROLLED : ControlledType::UNCONTROLLED);
+        last_player_to_move = cur_game_state.player_to_move;
 
-        cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, simulation_result.last_player_to_move);
+        cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, last_player_to_move);
 
         cur_game_state.player_to_move = (cur_game_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
     }
 
-    simulation_result.last_player_to_move = simulation_result.last_player_to_move;
+    last_player_to_move = last_player_to_move;
     switch (cur_game_state.outcome_for_previous_player)
     {
         // TODO(david): define a terminal interval for values, as there can be other values than winning and losing
         // NOTE(david): maybe there is no winning/losing terminal type, only values
         case GameOutcome::WIN:
         {
-            simulation_result.total_value = player_that_needs_to_win == simulation_result.last_player_to_move ? 1.0 : -1.0;
-            if (simulation_result.last_move.terminal_type != TerminalType::NOT_TERMINAL)
+            node->value += player_that_needs_to_win == last_player_to_move ? 1.0 : -1.0;
+            if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
             {
-                simulation_result.last_move.terminal_type = player_that_needs_to_win == simulation_result.last_player_to_move ? TerminalType::WINNING : TerminalType::LOSING;
+                node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::WINNING : TerminalType::LOSING;
             }
         }
         break;
         case GameOutcome::LOSS:
         {
-            simulation_result.total_value = player_that_needs_to_win == simulation_result.last_player_to_move ? -1.0 : 1.0;
-            if (simulation_result.last_move.terminal_type != TerminalType::NOT_TERMINAL)
+            node->value += player_that_needs_to_win == last_player_to_move ? -1.0 : 1.0;
+            if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
             {
-                simulation_result.last_move.terminal_type = player_that_needs_to_win == simulation_result.last_player_to_move ? TerminalType::LOSING : TerminalType::WINNING;
+                node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::LOSING : TerminalType::WINNING;
             }
         }
         break;
         case GameOutcome::DRAW:
         {
-            simulation_result.total_value = 0.0;
-            if (simulation_result.last_move.terminal_type != TerminalType::NOT_TERMINAL)
+            node->value += 0.0;
+            if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
             {
-                simulation_result.last_move.terminal_type = TerminalType::NEUTRAL;
+                node->terminal_info.terminal_type = TerminalType::NEUTRAL;
             }
         }
         break;
@@ -382,9 +378,9 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
         LOG(g_simresult_fs, "Player to move: " << PlayerToWord(cur_game_state.player_to_move));
         PrintGameState(cur_game_state, g_simresult_fs);
         LOG(g_simresult_fs, "Game outcome for previous player: " << GameOutcomeToWord(cur_game_state.outcome_for_previous_player));
-        LOG(g_simresult_fs, "Previous player: " << PlayerToWord(simulation_result.last_player_to_move));
-        LOG(g_simresult_fs, "TerminalType: " << TerminalTypeToWord(simulation_result.last_move.terminal_type));
-        LOG(g_simresult_fs, "ControlledType: " << ControlledTypeToWord(simulation_result.last_move.controlled_type));
+        LOG(g_simresult_fs, "Previous player: " << PlayerToWord(last_player_to_move));
+        LOG(g_simresult_fs, "TerminalType: " << TerminalTypeToWord(last_move_terminal_type));
+        LOG(g_simresult_fs, "ControlledType: " << ControlledTypeToWord(last_player_controlled_type));
         LOG(g_simresult_fs, "");
     }
 #endif
@@ -394,18 +390,12 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
         assert(movesequence_index == movesequence_from_position.number_of_moves && "still have moves to apply to the position from movesequence so the simulation can't end before that");
     }
 
-    simulation_result.num_simulations = 1;
-
-    return simulation_result;
+    ++node->num_simulations;
 }
 
-SimulationResult simulation_from_position(const MoveSequence &movesequence_from_position, const GameState &game_state)
+void simulation_from_position(const MoveSequence &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
 {
     assert(movesequence_from_position.number_of_moves > 0 && "must have at least one move to apply to the position");
-
-    SimulationResult simulation_result = {};
-    simulation_result.last_move.terminal_type = TerminalType::NOT_TERMINAL;
-    simulation_result.last_controlled_type = ControlledType::NONE;
 
     g_should_write_out_simulation = true;
 
@@ -426,38 +416,29 @@ SimulationResult simulation_from_position(const MoveSequence &movesequence_from_
          current_simulation_count < number_of_simulations;
          ++current_simulation_count)
     {
-        SimulationResult simulation_result_for_one_simulation = simulation_from_position_once(movesequence_from_position, game_state);
-
-        simulation_result.last_move = simulation_result_for_one_simulation.last_move;
-        simulation_result.last_controlled_type = simulation_result_for_one_simulation.last_controlled_type;
-        simulation_result.last_player_to_move = simulation_result_for_one_simulation.last_player_to_move;
-        simulation_result.total_value += simulation_result_for_one_simulation.total_value;
-        assert(simulation_result_for_one_simulation.num_simulations == 1);
-        simulation_result.num_simulations += simulation_result_for_one_simulation.num_simulations;
+        simulation_from_position_once(movesequence_from_position, game_state, node, node_pool);
 
 #if defined(DEBUG_WRITE_OUT)
-        LOGN(g_simresult_fs, simulation_result_for_one_simulation.total_value << " ");
+        LOGN(g_simresult_fs, node->value << " ");
         g_should_write_out_simulation = false;
 #endif
 
-        if (simulation_result_for_one_simulation.last_move.terminal_type != TerminalType::NOT_TERMINAL)
+        if (node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
         {
-            // simulation_result.num_simulations = max((u32)1, (u32)(number_of_simulations_weight));
-            simulation_result.num_simulations = 1;
+            number_of_simulations = 1;
+            // number_of_simulations = max((u32)1, (u32)(number_of_simulations_weight));
+            assert(node->num_simulations == 1);
 
-            simulation_result.total_value = simulation_result_for_one_simulation.total_value * simulation_result.num_simulations;
-            assert(simulation_result.num_simulations > 0);
+            node->value *= number_of_simulations;
 
             assert(current_simulation_count == 0);
-            break;
+            break ;
         }
     }
 
 #if defined(DEBUG_WRITE_OUT)
     LOG(g_simresult_fs, "");
 #endif
-
-    return simulation_result;
 }
 
 struct GameSummary
@@ -487,7 +468,7 @@ GameSummary play_one_game(Player player_to_win, NodePool &node_pool)
     ofstream playout_fs("debug/playouts/playout" + to_string(playout_counter++));
 #endif
 
-    constexpr auto max_evaluation_time = 1000000ms;
+    constexpr auto max_evaluation_time = 2000ms;
     auto start_time = std::chrono::steady_clock::now();
 
     Player previous_player = game_state.player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE;
