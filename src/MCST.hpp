@@ -25,7 +25,7 @@ enum class ControlledType
 struct TerminalInfo
 {
     TerminalType terminal_type;
-    ControlledType controlled_type; // TODO(david): this is not terminal information, it's about who controls the specific node to move from, move this into node
+    // ControlledType controlled_type; // TODO(david): this is not terminal information, it's about who controls the specific node to move from, move this into node
     u16 terminal_depth; // NOTE(david): this refers to the max depth when the node first found to be  terminal, which then propagates back to find in how many moves does it take to reach terminal game state
 };
 
@@ -35,6 +35,7 @@ struct SimulationResult
     u32 num_simulations;
     r64 total_value;
     TerminalInfo last_move;
+    ControlledType last_controlled_type;
     Player last_player_to_move;
 };
 
@@ -46,19 +47,20 @@ struct MoveSequence
 };
 
 using MoveProcessor = function<void(MoveSet &available_moves, Move move)>;
-using SimulateFromState = function<SimulationResult(const MoveSequence &move_chain_from_world_state)>;
+using SimulateFromState = function<SimulationResult(const MoveSequence &move_chain_from_world_state, const GameState &game_state)>;
 using TerminationPredicate = function<bool(bool found_perfect_move)>;
 
 // NOTE(david): must be signed
 typedef i32 NodeIndex;
 struct Node
 {
-    r64 value;
+    r32 value;
     u32 num_simulations;
 
     NodeIndex index;
     NodeIndex parent;
 
+    ControlledType controlled_type;
     TerminalInfo terminal_info;
 
     Move move_to_get_here;
@@ -109,7 +111,7 @@ public:
     MCST(const MCST &other) = delete;
     const MCST &operator=(const MCST &other) = delete;
 
-    Move Evaluate(const MoveSet &legal_moves_at_root_node, TerminationPredicate terminate_condition_fn, SimulateFromState simulation_from_state, MoveProcessor move_processor, NodePool &node_pool);
+    Move Evaluate(const MoveSet &legal_moves_at_root_node, TerminationPredicate terminate_condition_fn, SimulateFromState simulation_from_state, MoveProcessor move_processor, NodePool &node_pool, const GameState &game_state);
 
     u32 NumberOfSimulationsRan(void);
 

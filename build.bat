@@ -15,11 +15,13 @@ set MultithreadDLLRunTimeLibrary=/MD
 set CreateDLLWithDebug=/LDd
 set CreateDLL=/LD
 set CVersion=/std:c++17
+set WritePreprocessedOutputToFile=/P
 
 REM %MaximizeSpeed%
 
 set DebugCompilerFlags=%GenerateIntrinsicFunctions%^
                        %EnhanceOptimizedDebugging%^
+                       %MaximizeSpeed%^
                        %FullSmbolicDebuggingInformation%^
                        %NoLogo%^
                        %EnableStandardCStackUnwinding%^
