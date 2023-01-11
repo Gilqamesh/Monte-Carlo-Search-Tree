@@ -86,7 +86,7 @@ static string ControlledTypeToWord(ControlledType controlled_type)
 
 ostream &operator<<(ostream &os, const Node *node)
 {
-    LOGN(os, MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", index: " << node->index << ", sims: " << node->num_simulations << ", parent: " << node->parent << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", " << ControlledTypeToWord(node->controlled_type));
+    LOGN(os, MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", sims: " << node->num_simulations << ", " << ControlledTypeToWord(node->controlled_type)) << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", terminal depth(W/L/N): (" << node->terminal_info.terminal_depth.winning << "," << node->terminal_info.terminal_depth.losing << "," << node->terminal_info.terminal_depth.neutral << ")";
 
     return os;
 }
@@ -146,6 +146,8 @@ NodePool::~NodePool()
 
 static Node *InitializeNode(Node *node, Node *parent)
 {
+    // NOTE(david): can't 0 out the Node struct here, as the index is persistent
+    // TODO(david): separate persistent and transient data in Node
     node->value = 0.0;
     node->num_simulations = 0;
     if (parent)
@@ -159,7 +161,7 @@ static Node *InitializeNode(Node *node, Node *parent)
         node->parent = -1;
     }
     node->terminal_info.terminal_type = TerminalType::NOT_TERMINAL;
-    node->terminal_info.terminal_depth = 0;
+    node->terminal_info.terminal_depth = {};
     node->controlled_type = ControlledType::NONE;
     node->move_to_get_here = Move::NONE;
 
@@ -415,7 +417,6 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &lega
                 }
             }
         }
-
     }
 
     if (current_highest_uct_node == nullptr)
@@ -426,11 +427,8 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &lega
     return current_highest_uct_node->move_to_get_here;
 }
 
-MCST::MCST(NodePool &node_pool)
+MCST::MCST()
 {
-    node_pool.Clear();
-    _root_node = node_pool.AllocateNode(nullptr);
-    _root_node->controlled_type = ControlledType::CONTROLLED;
     winning_move_selection_strategy_fn = &_EvaluateBasedOnUCT;
 }
 
@@ -477,7 +475,10 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
     {
         return Move::NONE;
     }
-
+    node_pool.Clear();
+    _root_node = node_pool.AllocateNode(nullptr);
+    _root_node->controlled_type = ControlledType::CONTROLLED;
+    
     u32 EvaluateIterations = 0;
     double selection_cycles_total = 0;
     u32 selection_cycles_count = 0;
@@ -909,6 +910,59 @@ Node *MCST::_Expansion(Node *from_node, NodePool &node_pool)
     return result;
 }
 
+static void _updateTerminalDepthForParentNode(Node *cur_node, Node *parent_node)
+{
+    if (parent_node->terminal_info.terminal_depth.winning == 0)
+    {
+        parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
+    }
+    if (parent_node->terminal_info.terminal_depth.losing == 0)
+    {
+        parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
+    }
+    if (parent_node->terminal_info.terminal_depth.neutral == 0)
+    {
+        parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
+    }
+
+    if (parent_node->controlled_type == ControlledType::CONTROLLED)
+    {
+        // NOTE(david): Controlled Node favors winning, so it should choose the move that leads to the least amount of moves to win, and the move that leads to the most amount of moves to lose
+        if (cur_node->terminal_info.terminal_depth.winning < parent_node->terminal_info.terminal_depth.winning)
+        {
+            parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
+        }
+        if (cur_node->terminal_info.terminal_depth.losing > parent_node->terminal_info.terminal_depth.losing)
+        {
+            parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
+        }
+        if (cur_node->terminal_info.terminal_depth.neutral > parent_node->terminal_info.terminal_depth.neutral)
+        {
+            parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
+        }
+    }
+    else if (parent_node->controlled_type == ControlledType::UNCONTROLLED)
+    {
+        // NOTE(david): Uncontrolled Node favors losing outcome for us, so it should choose the move that leads to the most amount of moves that wins, and the move that leads to the least amount of moves to lose
+        if (cur_node->terminal_info.terminal_depth.winning > parent_node->terminal_info.terminal_depth.winning)
+        {
+            parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
+        }
+        if (cur_node->terminal_info.terminal_depth.losing < parent_node->terminal_info.terminal_depth.losing)
+        {
+            parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
+        }
+        if (cur_node->terminal_info.terminal_depth.neutral > parent_node->terminal_info.terminal_depth.neutral)
+        {
+            parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
+        }
+    }
+    else
+    {
+        UNREACHABLE_CODE;
+    }
+}
+
 void MCST::_BackPropagate(Node *from_node, NodePool &node_pool)
 {
     assert(from_node != _root_node && "root node is not a valid move so it couldn't have been simulated");
@@ -919,25 +973,42 @@ void MCST::_BackPropagate(Node *from_node, NodePool &node_pool)
         Node *parent_node = node_pool.GetParent(from_node);
         assert(parent_node != nullptr && "node can't be root to propagate back from, as if it was terminal we should have already returned an evaluation result");
 
-        // TODO(david): add terminal move info rule table maybe
-        if (from_node->controlled_type == ControlledType::UNCONTROLLED && from_node->terminal_info.terminal_type == TerminalType::WINNING)
+        switch (from_node->terminal_info.terminal_type)
+        {
+            case TerminalType::WINNING: {
+                from_node->terminal_info.terminal_depth.winning = from_node->depth;
+            } break ;
+            case TerminalType::LOSING: {
+                from_node->terminal_info.terminal_depth.losing = from_node->depth;
+            } break ;
+            case TerminalType::NEUTRAL: {
+                from_node->terminal_info.terminal_depth.neutral = from_node->depth;
+            } break ;
+            default: UNREACHABLE_CODE;
+        }
+
+        if (from_node->controlled_type == ControlledType::UNCONTROLLED && from_node->terminal_info.terminal_type == TerminalType::WINNING || from_node->controlled_type == ControlledType::CONTROLLED && from_node->terminal_info.terminal_type == TerminalType::LOSING)
         {
             parent_node->terminal_info.terminal_type = from_node->terminal_info.terminal_type;
         }
-        if (from_node->controlled_type == ControlledType::CONTROLLED && from_node->terminal_info.terminal_type == TerminalType::LOSING)
-        {
-            parent_node->terminal_info.terminal_type = from_node->terminal_info.terminal_type;
-        }
+        _updateTerminalDepthForParentNode(from_node, parent_node);
     }
 
     Node *cur_node = node_pool.GetParent(from_node);
     while (cur_node != nullptr)
     {
+        Node *parent_node = node_pool.GetParent(cur_node);
+
         // TODO(david): add backpropagating rules terminal rules here?
+        if (parent_node)
+        {
+            _updateTerminalDepthForParentNode(cur_node, parent_node);
+        }
+
         cur_node->num_simulations += from_node->num_simulations;
         cur_node->value += from_node->value;
 
-        cur_node = node_pool.GetParent(cur_node);
+        cur_node = parent_node;
     }
 }
 

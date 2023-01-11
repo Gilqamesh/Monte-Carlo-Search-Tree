@@ -36,7 +36,8 @@ set ConsoleApplication=/SUBSYSTEM:CONSOLE
 
 set LinkerFlags=%NoIncrementalLinking%^
                 %ConsoleApplication%^
-                %EliminateNotReferencedFunctions%
+                %EliminateNotReferencedFunctions%^
+                raylib.lib
 
 pushd build
 cl %DebugCompilerFlags% ../src/main.cpp /link %LinkerFlags%

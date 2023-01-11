@@ -22,22 +22,22 @@ enum class ControlledType
     ControlledType_Size
 };
 
+struct TerminalDepth
+{
+    u16 winning;
+    u16 losing;
+    u16 neutral;
+};
+
 struct TerminalInfo
 {
     TerminalType terminal_type;
-    // ControlledType controlled_type; // TODO(david): this is not terminal information, it's about who controls the specific node to move from, move this into node
-    u16 terminal_depth; // NOTE(david): this refers to the max depth when the node first found to be  terminal, which then propagates back to find in how many moves does it take to reach terminal game state
+    // TODO(david): this about this and how to implement it, but one problem was propagating back the actual probability, which is not hard (multiply branching until we get to the terminal node), however to make it even more useful, instead of treating all the moves as equal probability, a heuristic evaluation would also need to be stored (or processed dynamically), so that the moves are weighted according to the heuristic value
+    // r32 p_of_terminal_outcome; // NOTE(david): probability that the outcomes from the Node results in a terminal outcome, useful information to determine best next move
+                               // probability of terminal outcome for node = (heuristic weight for node / number of node's children / sum of heuristic weights for node) + sum of probability of terminal outcomes for node's children
+    // u16 terminal_depth; // NOTE(david): this refers to the max depth when the node first found to be terminal, which then propagates back to find in how many moves does it take to reach terminal game state, can be useful to choose the next move that wins in the least moves and loses in the most moves, also based on the depth, extra weighted info could be propagated up the root, that is a likelyhood of the outcome: for example if there are 20 of terminally losing nodes scattered down the tree at depth 10, this could be weighted in to the starting move as 20 * 1 / 10 chance of losing (the reciprocal function is not the best used here, it should be a function that accounts for the branching)
+    TerminalDepth terminal_depth;
 };
-
-// TODO(david): can this be just a node instead and the simulation will update its values?
-// struct SimulationResult
-// {
-//     u32 num_simulations;
-//     r64 total_value;
-//     TerminalInfo last_move;
-//     ControlledType last_controlled_type;
-//     Player last_player_to_move;
-// };
 
 // using MoveSequence: vector<Move> -> { Move[Move::NONE], u32 }
 struct MoveSequence
@@ -65,7 +65,7 @@ struct Node
     u16 depth;
 };
 
-class NodePool
+struct NodePool
 {
     const NodeIndex _number_of_nodes_allocated;
 
@@ -108,7 +108,7 @@ private:
     Node *_root_node;
 
 public:
-    MCST(NodePool &node_pool);
+    MCST();
     MCST(const MCST &other) = delete;
     const MCST &operator=(const MCST &other) = delete;
 

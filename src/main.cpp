@@ -6,6 +6,7 @@
 #include <cassert>
 #include <functional>
 #include "types.hpp"
+#include "raylib.h"
 
 using namespace std;
 
@@ -380,7 +381,6 @@ void simulation_from_position_once(const MoveSequence &movesequence_from_positio
         LOG(g_simresult_fs, "Game outcome for previous player: " << GameOutcomeToWord(cur_game_state.outcome_for_previous_player));
         LOG(g_simresult_fs, "Previous player: " << PlayerToWord(last_player_to_move));
         LOG(g_simresult_fs, "TerminalType: " << TerminalTypeToWord(last_move_terminal_type));
-        LOG(g_simresult_fs, "ControlledType: " << ControlledTypeToWord(last_player_controlled_type));
         LOG(g_simresult_fs, "");
     }
 #endif
@@ -468,14 +468,14 @@ GameSummary play_one_game(Player player_to_win, NodePool &node_pool)
     ofstream playout_fs("debug/playouts/playout" + to_string(playout_counter++));
 #endif
 
-    constexpr auto max_evaluation_time = 2000ms;
+    constexpr auto max_evaluation_time = 2000000ms;
     auto start_time = std::chrono::steady_clock::now();
 
     Player previous_player = game_state.player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE;
     game_state.outcome_for_previous_player = DetermineGameOutcome(game_state, previous_player);
     while (game_state.outcome_for_previous_player == GameOutcome::NONE)
     {
-        MCST mcst(node_pool);
+        MCST mcst;
         Move selected_move;
         bool should_terminate_simulation = false;
         bool stop_parent_sleep = false;
@@ -612,60 +612,219 @@ GameSummary play_one_game(Player player_to_win, NodePool &node_pool)
     return summary;
 }
 
+static void InitializeGameState(GameState *game_state)
+{
+    *game_state = {};
+    game_state->player_to_move = Player::CIRCLE;
+    for (u32 move_index = 0; move_index < Move::NONE; ++move_index)
+    {
+        game_state->move_to_player_map[move_index] = Player::NONE;
+        Move move = static_cast<Move>(move_index);
+        game_state->legal_moveset.moves[move] = move;
+        ++game_state->legal_moveset.moves_left;
+    }
+    Player previous_player = game_state->player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE;
+    game_state->outcome_for_previous_player = DetermineGameOutcome(*game_state, previous_player);
+}
+
+struct GameWindow
+{
+    u32 width;
+    u32 height;
+};
+
+bool g_finished_evaluation = false;
+Move g_selected_move = Move::NONE;
+bool g_evaluate_thread_is_working = false;
+thread g_evaluate_thread;
+
+static void EvaluateMove(GameState *game_state, MCST *mcst, NodePool *node_pool, std::chrono::milliseconds max_evaluation_time)
+{
+    bool force_end_of_evaluation = false;
+    bool stop_parent_sleep = false;
+    Move selected_move;
+    auto start_time = std::chrono::steady_clock::now();
+    thread t([&selected_move, &stop_parent_sleep, &force_end_of_evaluation](GameState *game_state, MCST *mcst, NodePool *node_pool) {
+        try
+        {
+            TIMED_BLOCK("Evaluate", selected_move = mcst->Evaluate(game_state->legal_moveset, [&stop_parent_sleep, &force_end_of_evaluation](bool found_move){
+                if (found_move)
+                {
+                    stop_parent_sleep = true;
+                    return true;
+                }
+                return force_end_of_evaluation;
+            }, simulation_from_position, ProcessMove, *node_pool, *game_state));
+        }
+        catch (exception &e)
+        {
+            LOG(cerr, e.what());
+            exit(1);
+        }
+    }, game_state, mcst, node_pool);
+
+    while (std::chrono::steady_clock::now() - start_time < max_evaluation_time)
+    {
+        if (stop_parent_sleep)
+        {
+            break;
+        }
+        this_thread::sleep_for(1ms);
+    }
+    force_end_of_evaluation = true;
+    t.join();
+
+    g_selected_move = selected_move;
+    g_finished_evaluation = true;
+}
+
+static void UpdateMove(GameState *game_state, Move move)
+{
+    assert(game_state->legal_moveset.moves[move] != Move::NONE);
+    game_state->legal_moveset.moves[move] = Move::NONE;
+    --game_state->legal_moveset.moves_left;
+
+    assert(game_state->move_to_player_map[move] == Player::NONE);
+    game_state->move_to_player_map[move] = game_state->player_to_move;
+
+    game_state->outcome_for_previous_player = DetermineGameOutcome(*game_state, game_state->player_to_move);
+
+    switch (game_state->outcome_for_previous_player)
+    {
+        case GameOutcome::WIN: {
+            LOG(cout, "Game over, player " << PlayerToWord(game_state->player_to_move) << " has won!");
+            InitializeGameState(game_state);
+        } break ;
+        case GameOutcome::LOSS: {
+            LOG(cout, "Game over, player " << PlayerToWord(game_state->player_to_move) << " has lost!");
+            InitializeGameState(game_state);
+        } break ;
+        case GameOutcome::DRAW: {
+            LOG(cout, "Game over, it's a draw!");
+            InitializeGameState(game_state);
+        } break ;
+        case GameOutcome::NONE: {
+            game_state->player_to_move = game_state->player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE;
+        } break ;
+    }
+}
+
+static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_pool, GameWindow *game_window)
+{
+    constexpr std::chrono::milliseconds max_evaluation_time = 2000ms;
+    if (game_state->player_to_move == Player::CROSS)
+    {
+        if (g_finished_evaluation == false)
+        {
+
+            if (g_evaluate_thread_is_working == false)
+            {
+                g_selected_move = Move::NONE;
+                g_evaluate_thread_is_working = true;
+                g_evaluate_thread = thread([](GameState *game_state, MCST *mcst, NodePool *node_pool, std::chrono::milliseconds max_evaluation_time) {
+                    EvaluateMove(game_state, mcst, node_pool, max_evaluation_time);
+                }, game_state, mcst, node_pool, max_evaluation_time);
+            }
+        }
+        else
+        {
+            g_evaluate_thread.join();
+            g_evaluate_thread_is_working = false;
+            if (g_selected_move != Move::NONE)
+            {
+                g_finished_evaluation = false;
+
+                UpdateMove(game_state, g_selected_move);
+
+                ++g_move_counter;
+            }
+        }
+    }
+    else
+    {
+        assert(game_state->player_to_move == Player::CIRCLE);
+        Vector2 mouse_position = GetMousePosition();
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            u32 selected_grid_col = (u32)(mouse_position.x * 3.0f / game_window->width);
+            u32 selected_grid_row = (u32)(mouse_position.y * 3.0f / game_window->height);
+            u32 selected_move_index = selected_grid_row * 3 + selected_grid_col;
+            Move selected_move = (Move)selected_move_index;
+            if (game_state->move_to_player_map[selected_move] == Player::NONE)
+            {
+                UpdateMove(game_state, selected_move);
+            }
+        }
+    }
+}
+
+static void RenderGameState(GameState *game_state, GameWindow *game_window)
+{
+    for (u32 i = 0; i < 2; ++i)
+    {
+        Vector2 horizontal_start = { 0.0f, (r32)game_window->height * (i + 1) / 3.0f };
+        Vector2 horizontal_end = { (r32)game_window->width, (r32)game_window->height * (i + 1) / 3.0f };
+        DrawLineEx(horizontal_start, horizontal_end, 5.0f, BLACK);
+
+        Vector2 vertical_start = { (r32)game_window->width * (i + 1) / 3.0f, 0.0f };
+        Vector2 vertical_end = { (r32)game_window->width * (i + 1) / 3.0f, (r32)game_window->height };
+        DrawLineEx(vertical_start, vertical_end, 5.0f, BLACK);
+    }
+
+    for (u32 rows = 0; rows < 3; ++rows)
+    {
+        for (u32 cols = 0; cols < 3; ++cols)
+        {
+            u32 move_index = rows * 3 + cols;
+            Vector2 grid_offset = { (r32)game_window->width / 3.0f * (r32)cols, (r32)game_window->height / 3.0f * (r32)rows };
+            Vector2 grid_size   = { (r32)game_window->width / 3.0f, (r32)game_window->height / 3.0f };
+            switch (game_state->move_to_player_map[move_index])
+            {
+                case Player::CIRCLE: {
+                    DrawEllipseLines(grid_size.x / 2.0f + grid_offset.x, grid_size.y / 2.0f + grid_offset.y, grid_size.x / 2.0f, grid_size.y / 2.0f, RED);
+                } break ;
+                case Player::CROSS: {
+                    Vector2 cross_start1 = grid_offset;
+                    Vector2 cross_end1   = { grid_offset.x + grid_size.x, grid_offset.y + grid_size.y };
+                    DrawLineEx(cross_start1, cross_end1, 3.0f, BLUE);
+
+                    Vector2 cross_start2 = { grid_offset.x, grid_offset.y + grid_size.y };
+                    Vector2 cross_end2   = { grid_offset.x + grid_size.x, grid_offset.y };
+                    DrawLineEx(cross_start2, cross_end2, 3.0f, BLUE);
+                } break ;
+            }
+        }
+    }
+}
+
 i32 main()
 {
     ofstream game_outcome_fs("debug/game_summary", ios_base::out | ios::trunc);
 
+    GameWindow game_window = { 800, 600 };
+    InitWindow(game_window.width, game_window.height, "Tic-Tac-Toe");
+
+    SetTargetFPS(60);
+
     constexpr NodeIndex node_pool_size = 65536;
     NodePool node_pool(node_pool_size);
+    MCST mcst;
 
-    constexpr u32 number_of_games = 100000;
     u32 number_of_wins = 0;
     u32 number_of_losses = 0;
     u32 number_of_draws = 0;
-    for (u32 current_game_count = 1;
-         current_game_count <= number_of_games;
-         ++current_game_count)
+    // gen.seed(current_game_count);
+    GameState game_state;
+    InitializeGameState(&game_state);
+    while (WindowShouldClose() == false)
     {
-        gen.seed(current_game_count);
-        r64 reward_for_reinforced_learning = 0.0;
+        BeginDrawing();
+        ClearBackground(WHITE);
 
-        TIMED_BLOCK("play_one_game", GameSummary summary = play_one_game(Player::CIRCLE, node_pool));
-        // TIMED_BLOCK(GameSummary summary = play_one_game(Player::CIRCLE, node_pool));
-        switch (summary.outcome)
-        {
-            case GameOutcome::WIN:
-            {
-                reward_for_reinforced_learning = 1.0;
-                ++number_of_wins;
-            }
-            break;
-            case GameOutcome::LOSS:
-            {
-                reward_for_reinforced_learning = -1.0;
-                ++number_of_losses;
-            }
-            break;
-            case GameOutcome::DRAW:
-            {
-                reward_for_reinforced_learning = 0.0;
-                ++number_of_draws;
-            }
-            break;
-            default:
-            {
-                UNREACHABLE_CODE;
-            }
-        }
-        static constexpr r64 alpha = 0.1;
-        static constexpr r64 gamma = 0.9;
+        UpdateGameState(&game_state, &mcst, &node_pool, &game_window);
+        RenderGameState(&game_state, &game_window);
 
-        g_tuned_exploration_factor_weight = (1.0 - alpha) * g_tuned_exploration_factor_weight + alpha * (reward_for_reinforced_learning + gamma * g_tuned_exploration_factor_weight);
-        LOG(cout, "Wins: " << number_of_wins << ", Losses: " << number_of_losses << ", Draws: " << number_of_draws << ", Total games played: " << current_game_count);
-
-        LOG(game_outcome_fs, "Number of simulations: " << summary.number_of_simulations << ", number of moves: " << summary.number_of_moves << ", average number of simulations per move: " << (r64)summary.number_of_simulations / (r64)summary.number_of_moves << ", outcome: " << GameOutcomeToWord(summary.outcome));
-
-        LOG(cout, "Number of simulations: " << summary.number_of_simulations << ", number of moves: " << summary.number_of_moves << ", average number of simulations per move: " << (r64)summary.number_of_simulations / (r64)summary.number_of_moves << ", outcome: " << GameOutcomeToWord(summary.outcome));
-        LOG(cout, "g_tuned_exploration_factor_weight: " << g_tuned_exploration_factor_weight);
+        EndDrawing();
     }
+    CloseWindow();
 }
