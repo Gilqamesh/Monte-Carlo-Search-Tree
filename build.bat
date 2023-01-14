@@ -21,7 +21,6 @@ REM %MaximizeSpeed%
 
 set DebugCompilerFlags=%GenerateIntrinsicFunctions%^
                        %EnhanceOptimizedDebugging%^
-                       %MaximizeSpeed%^
                        %FullSmbolicDebuggingInformation%^
                        %NoLogo%^
                        %EnableStandardCStackUnwinding%^

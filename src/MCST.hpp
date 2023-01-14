@@ -75,9 +75,19 @@ struct NodePool
     NodeIndex *_free_nodes;
     NodeIndex _free_nodes_index;
 
+    struct HashResult
+    {
+        NodeIndex node_index;
+        Node *node;
+        Move move;
+    };
+    static constexpr u32 allowed_branching_factor = Move::NONE;
     struct MoveToNodeTable
     {
-        NodeIndex children[Move::NONE];
+        // TODO(david): store the moves as well, as that allows for linear probing to resolve collisions
+        Node *children[allowed_branching_factor];
+        u32 number_of_children;
+        // NodeIndex children[Move::NONE];
     };
 
     MoveToNodeTable *_move_to_node_tables;
@@ -90,15 +100,12 @@ public:
     void FreeNode(Node *node);
 
     void AddChild(Node *node, Node *child, Move move);
-    Node *GetChild(Node *node, Move move);
     MoveToNodeTable *GetChildren(Node *node);
     Node *GetParent(Node *node) const;
-    Node *SetParent(Node *node, Node *parent);
 
     void Clear();
 };
 
-using MoveProcessor = function<void(MoveSet &available_moves, Move move)>;
 using SimulateFromState = function<void(const MoveSequence &move_chain_from_world_state, const GameState &game_state, Node *node, const NodePool &node_pool)>;
 using TerminationPredicate = function<bool(bool found_perfect_move)>;
 
@@ -112,7 +119,7 @@ public:
     MCST(const MCST &other) = delete;
     const MCST &operator=(const MCST &other) = delete;
 
-    Move Evaluate(const MoveSet &legal_moves_at_root_node, TerminationPredicate terminate_condition_fn, SimulateFromState simulation_from_state, MoveProcessor move_processor, NodePool &node_pool, const GameState &game_state);
+    Move Evaluate(const MoveSet &legal_moves_at_root_node, TerminationPredicate terminate_condition_fn, SimulateFromState simulation_from_state, NodePool &node_pool, const GameState &game_state);
 
     u32 NumberOfSimulationsRan(void);
 
@@ -123,12 +130,12 @@ private:
         MoveSequence movesequence_from_position;
     };
 
-    SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, MoveProcessor move_processor, NodePool &node_pool);
+    SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, NodePool &node_pool);
     Node *_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, const MoveSequence &movesequence_from_position, bool focus_on_lowest_utc_to_prune, NodePool &node_pool);
     Node *_Expansion(Node *from_node, NodePool &node_pool);
     void _BackPropagate(Node *from_node, NodePool &node_pool);
 
-    using WinningMoveSelectionStrategy = function<Move(Node *from_node, const MoveSet &legal_moves_at_root_node, NodePool &node_pool)>;
+    using WinningMoveSelectionStrategy = function<Move(Node *from_node, NodePool &node_pool)>;
     WinningMoveSelectionStrategy winning_move_selection_strategy_fn;
 };
 

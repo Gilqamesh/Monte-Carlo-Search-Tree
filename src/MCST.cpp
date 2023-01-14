@@ -124,13 +124,15 @@ NodePool::NodePool(NodeIndex number_of_nodes_to_allocate)
         throw runtime_error("couldn't allocate _move_to_node_tables in NodePool");
     }
 
-    for (u32 table_index = 0; table_index < _number_of_nodes_allocated; ++table_index)
-    {
-        for (u32 child_index = 0; child_index < ArrayCount(MoveToNodeTable::children); ++child_index)
-        {
-            _move_to_node_tables[table_index].children[child_index] = -1;
-        }
-    }
+    // for (u32 table_index = 0; table_index < _number_of_nodes_allocated; ++table_index)
+    // {
+    //     for (u32 child_index = 0; child_index < allowed_branching_factor; ++child_index)
+    //     {
+    //         _move_to_node_tables[table_index].children[child_index] = nullptr;
+    //     }
+    //     _move_to_node_tables[table_index].number_of_children = 0;
+    // }
+    memset(_move_to_node_tables, 0, _number_of_nodes_allocated * sizeof(*_move_to_node_tables));
 }
 
 NodePool::~NodePool()
@@ -197,35 +199,25 @@ Node *NodePool::AllocateNode(Node *parent)
 void NodePool::FreeNode(Node *node)
 {
     ++_free_nodes_index;
-    for (u32 child_index = 0; child_index < ArrayCount(MoveToNodeTable::children); ++child_index)
-    {
-        _move_to_node_tables[node->index].children[child_index] = -1;
-    }
+    _move_to_node_tables[node->index] = {};
 }
 
 void NodePool::AddChild(Node *node, Node *child, Move move)
 {
-    _move_to_node_tables[node->index].children[move] = child->index;
+    MoveToNodeTable *table = &_move_to_node_tables[node->index];
+    assert(table->number_of_children < ArrayCount(MoveToNodeTable::children));
+    assert(table->children[table->number_of_children] == nullptr);
+    table->children[table->number_of_children] = child;
+
+    ++table->number_of_children;
+
     child->move_to_get_here = move;
-}
-
-Node *NodePool::GetChild(Node *node, Move move)
-{
-    Node *child_node = nullptr;
-
-    i32 node_index = _move_to_node_tables[node->index].children[move];
-    if (node_index != -1)
-    {
-        child_node = &_nodes[node_index];
-    }
-
-    return child_node;
 }
 
 NodePool::MoveToNodeTable *NodePool::GetChildren(Node *node)
 {
-    assert(false && "not using it, but think about the access pattern of how we iterate over the children of a single node, currently it's only used with root when evaluating the move answer");
-    return &_move_to_node_tables[node->index];
+    assert(node->index >= 0 && node->index < _available_node_index);
+    return (&_move_to_node_tables[node->index]);
 }
 
 Node *NodePool::GetParent(Node *node) const
@@ -242,13 +234,15 @@ Node *NodePool::GetParent(Node *node) const
 
 void NodePool::Clear()
 {
-    for (u32 table_index = 0; table_index < _available_node_index; ++table_index)
-    {
-        for (u32 child_index = 0; child_index < ArrayCount(MoveToNodeTable::children); ++child_index)
-        {
-            _move_to_node_tables[table_index].children[child_index] = -1;
-        }
-    }
+    // for (u32 table_index = 0; table_index < _available_node_index; ++table_index)
+    // {
+    //     for (u32 child_index = 0; child_index < allowed_branching_factor; ++child_index)
+    //     {
+    //         _move_to_node_tables[table_index].children[child_index] = nullptr;
+    //     }
+    //     _move_to_node_tables[table_index].number_of_children = 0;
+    // }
+    memset(_move_to_node_tables, 0, _available_node_index * sizeof(*_move_to_node_tables));
     _available_node_index = 0;
     _free_nodes_index = -1;
 }
@@ -277,38 +271,32 @@ static r64 UCT(Node *node, u32 number_of_branches, NodePool &node_pool)
 }
 
 // TODO(david): implement
-static Move _EvaluateBasedOnMostSimulated(Node *node_to_evaluate_from, const MoveSet &legal_moveset_at_node_to_evaluate_from, NodePool &node_pool)
+static Move _EvaluateBasedOnMostSimulated(Node *node_to_evaluate_from, NodePool &node_pool)
 {
     // TODO(david): implement
     throw runtime_error("Not implemented");
 }
 
-static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &legal_moveset_at_node_to_evaluate_from, NodePool &node_pool)
+static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool)
 {
     r64 highest_uct = -INFINITY;
     Node *current_highest_uct_node = nullptr;
 
     assert(node_to_evaluate_from->controlled_type == ControlledType::CONTROLLED && "the strategy here is to win, so if it's an uncontrolled node than the strategy would be to choose the worst uct or losing move");
 
-    for (u32 move_index = 0; move_index < ArrayCount(legal_moveset_at_node_to_evaluate_from.moves); ++move_index)
+    NodePool::MoveToNodeTable *children_nodes = node_pool.GetChildren(node_to_evaluate_from);
+    u32 number_of_branches = children_nodes->number_of_children;
+    for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
     {
-        Move move = legal_moveset_at_node_to_evaluate_from.moves[move_index];
-        if (move == Move::NONE)
-        {
-            continue;
-        }
+        Node *child = children_nodes->children[child_index];
+        assert(child != nullptr && child->move_to_get_here != Move::NONE);
 
-        Node *child = node_pool.GetChild(node_to_evaluate_from, move);
-        if (child == nullptr)
-        {
-            // NOTE(david): node isn't simulated yet -> continue
-        }
-        else if (child->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
+        if (child->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
         {
             switch (child->terminal_info.terminal_type)
             {
                 case TerminalType::LOSING: {
-                    r64 uct = UCT(child, legal_moveset_at_node_to_evaluate_from.moves_left, node_pool);
+                    r64 uct = UCT(child, number_of_branches, node_pool);
                     if (current_highest_uct_node == nullptr)
                     {
                         highest_uct = uct;
@@ -317,7 +305,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &lega
                     else if (current_highest_uct_node->terminal_info.terminal_type == TerminalType::LOSING)
                     {
                         // TODO(david): choose the one with the higher terminal depth
-                        r64 uct = UCT(child, legal_moveset_at_node_to_evaluate_from.moves_left, node_pool);
+                        r64 uct = UCT(child, number_of_branches, node_pool);
                         if (uct > highest_uct)
                         {
                             highest_uct = uct;
@@ -334,7 +322,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &lega
                 } break ;
                 case TerminalType::NEUTRAL: {
                     // NOTE(david): dispatching over the previous highest uct node's terminal type
-                    r64 uct = UCT(child, legal_moveset_at_node_to_evaluate_from.moves_left, node_pool);
+                    r64 uct = UCT(child, number_of_branches, node_pool);
                     if (current_highest_uct_node == nullptr)
                     {
                         highest_uct = uct;
@@ -375,7 +363,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, const MoveSet &lega
         }
         else
         {
-            r64 uct = UCT(child, legal_moveset_at_node_to_evaluate_from.moves_left, node_pool);
+            r64 uct = UCT(child, number_of_branches, node_pool);
             if (current_highest_uct_node == nullptr)
             {
                 highest_uct = uct;
@@ -432,44 +420,30 @@ MCST::MCST()
     winning_move_selection_strategy_fn = &_EvaluateBasedOnUCT;
 }
 
-static void DebugPrintDecisionTreeHelper(Node *from_node, Player player_to_move, const MoveSet &legal_moveset_from_node, u32 depth, ofstream &tree_fs, NodePool &node_pool)
+static void DebugPrintDecisionTreeHelper(Node *from_node, Player player_to_move, u32 depth, ofstream &tree_fs, NodePool &node_pool)
 {
     // TODO(david): move depth to node
     LOG(tree_fs, string(depth * 4, ' ') << "(player to move: " << PlayerToWord(player_to_move) << ", depth: " << depth << ", " << from_node << ")");
 
-    for (u32 move_index = 0; move_index < ArrayCount(legal_moveset_from_node.moves); ++move_index)
+    NodePool::MoveToNodeTable *children_nodes = node_pool.GetChildren(from_node);
+    for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
     {
-        Move move = legal_moveset_from_node.moves[move_index];
-        if (move == Move::NONE)
-        {
-            continue;
-        }
+        Node *child_node = children_nodes->children[child_index];
+        assert(child_node != nullptr && child_node->move_to_get_here != Move::NONE);
 
-        MoveSet moveset_from_node = legal_moveset_from_node;
-        assert(moveset_from_node.moves[move] != Move::NONE);
-        moveset_from_node.moves[move] = Move::NONE;
-        --moveset_from_node.moves_left;
-
-        Node *child_node = node_pool.GetChild(from_node, move);
-        if (child_node == nullptr)
-        {
-            // isn't simulated yet
-            continue;
-        }
-
-        DebugPrintDecisionTreeHelper(child_node, player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE, moveset_from_node, depth + 1, tree_fs, node_pool);
+        DebugPrintDecisionTreeHelper(child_node, player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE, depth + 1, tree_fs, node_pool);
     }
 }
 
-static void DebugPrintDecisionTree(Node *from_node, const MoveSet &legal_moveset_from_node, u32 move_counter, NodePool &node_pool, const GameState &game_state)
+static void DebugPrintDecisionTree(Node *from_node, u32 move_counter, NodePool &node_pool, const GameState &game_state)
 {
     ofstream tree_fs("debug/trees/tree" + to_string(move_counter));
-    DebugPrintDecisionTreeHelper(from_node, game_state.player_to_move, legal_moveset_from_node, 0, tree_fs, node_pool);
+    DebugPrintDecisionTreeHelper(from_node, game_state.player_to_move, 0, tree_fs, node_pool);
 }
 
 static u32 g_move_counter;
 
-Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredicate termination_predicate, SimulateFromState simulation_from_state, MoveProcessor move_processor, NodePool &node_pool, const GameState &game_state)
+Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredicate termination_predicate, SimulateFromState simulation_from_state, NodePool &node_pool, const GameState &game_state)
 {
     if (legal_moveset_at_root_node.moves_left == 0)
     {
@@ -488,7 +462,7 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
     u32 backpropagate_cycles_count = 0;
     while (termination_predicate(false) == false)
     {
-        TIMED_BLOCK("_Selection", SelectionResult selection_result = _Selection(legal_moveset_at_root_node, move_processor, node_pool));
+        TIMED_BLOCK("_Selection", SelectionResult selection_result = _Selection(legal_moveset_at_root_node, node_pool));
         // SelectionResult selection_result = _Selection(legal_moveset_at_root_node, move_processor, node_pool);
         selection_cycles_total += g_clock_cycles_var;
         ++selection_cycles_count;
@@ -503,7 +477,7 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
             }
 
 // #if defined(DEBUG_WRITE_OUT)
-//             DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter, node_pool);
+//             DebugPrintDecisionTree(_root_node, g_move_counter, node_pool);
 // #endif
 
         }
@@ -517,7 +491,7 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
             if (selection_result.selected_node->num_simulations > 10000000)
             {
 #if defined(DEBUG_WRITE_OUT)
-    DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter, node_pool, game_state);
+    DebugPrintDecisionTree(_root_node, g_move_counter, node_pool, game_state);
 #endif
                 assert(false && "suspicious amount of simulations, make sure this could happen");
             }
@@ -534,11 +508,11 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
     LOG(cout, "Simulation total cycles: " << simulation_cycles_total << "M");
 
 #if defined(DEBUG_WRITE_OUT)
-    DebugPrintDecisionTree(_root_node, legal_moveset_at_root_node, g_move_counter, node_pool, game_state);
+    DebugPrintDecisionTree(_root_node, g_move_counter, node_pool, game_state);
 #endif
 
-    // TIMED_BLOCK("winning_move_selection_strategy_fn", Move result_move = winning_move_selection_strategy_fn(_root_node, legal_moveset_at_root_node, node_pool));
-    Move result_move = winning_move_selection_strategy_fn(_root_node, legal_moveset_at_root_node, node_pool);
+    // TIMED_BLOCK("winning_move_selection_strategy_fn", Move result_move = winning_move_selection_strategy_fn(_root_node, node_pool));
+    Move result_move = winning_move_selection_strategy_fn(_root_node, node_pool);
 
     return result_move;
 }
@@ -572,28 +546,20 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
     Node *winning_node = nullptr;
     r64 winning_uct = INFINITY;
 
-    Move empty_moves[Move::NONE] = {};
-    u32 empty_moves_size = 0;
+    NodePool::MoveToNodeTable *children_nodes = node_pool.GetChildren(from_node);
+    // TODO(david): dynamically control branching factor for example based on depth
+    u32 number_of_branches = legal_moves_from_node.moves_left;
 
-    assert(legal_moves_from_node.moves_left > 0);
-    for (u32 move_index = 0; move_index < ArrayCount(legal_moves_from_node.moves); ++move_index)
+    MoveSet cur_legal_moves_from_node = legal_moves_from_node;
+
+    for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
     {
-        Move move = legal_moves_from_node.moves[move_index];
-        if (move == Move::NONE)
-        {
-            continue ;
-        }
+        Node *child_node = children_nodes->children[child_index];
+        assert(child_node != nullptr && child_node->move_to_get_here != Move::NONE);
 
-        // IMPORTANT(david): go over all the nodes first checking for a terminal winning/losing move depending on if the from_node is controlled or uncontrolled
-        // TODO(david): also it makes sense maybe to randomly choose moves from the position or based on some heuristic of the game state
-        Node *child_node = node_pool.GetChild(from_node, move);
-        if (child_node == nullptr)
-        {
-            assert(empty_moves_size < ArrayCount(empty_moves));
-            empty_moves[empty_moves_size++] = move;
-            continue ;
-        }
-        else if (child_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
+        cur_legal_moves_from_node.DeleteMove(child_node->move_to_get_here);
+
+        if (child_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
         {
             assert(child_node->num_simulations > 0 && "how is this child node chosen as a move but not simulated once? Did it not get to backpropagation?");
 
@@ -616,11 +582,11 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     if (winning_node == nullptr)
                     {
                         winning_node = child_node;
-                        winning_uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                        winning_uct = UCT(child_node, number_of_branches, node_pool);
                     }
                     else
                     {
-                        r64 uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                        r64 uct = UCT(child_node, number_of_branches, node_pool);
                         // TODO(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
                         if (uct < winning_uct)
                         {
@@ -643,11 +609,11 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     if (neutral_controlled_node == nullptr)
                     {
                         neutral_controlled_node = child_node;
-                        neutral_controlled_uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                        neutral_controlled_uct = UCT(child_node, number_of_branches, node_pool);
                     }
                     else
                     {
-                        r64 uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                        r64 uct = UCT(child_node, number_of_branches, node_pool);
                         if (uct > neutral_controlled_uct)
                         {
                             neutral_controlled_node = child_node;
@@ -660,11 +626,11 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     if (neutral_uncontrolled_node == nullptr)
                     {
                         neutral_uncontrolled_node = child_node;
-                        neutral_uncontrolled_uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                        neutral_uncontrolled_uct = UCT(child_node, number_of_branches, node_pool);
                     }
                     else
                     {
-                        r64 uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                        r64 uct = UCT(child_node, number_of_branches, node_pool);
                         // TODO(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
                         if (uct < neutral_uncontrolled_uct)
                         {
@@ -686,11 +652,11 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     if (losing_node == nullptr)
                     {
                         losing_node = child_node;
-                        losing_uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                        losing_uct = UCT(child_node, number_of_branches, node_pool);
                     }
                     else
                     {
-                        r64 uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                        r64 uct = UCT(child_node, number_of_branches, node_pool);
                         // NOTE(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
                         if (uct > losing_uct)
                         {
@@ -721,16 +687,15 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
         else
         {
             assert(child_node->num_simulations > 0 && "how is this child node chosen as a move but not simulated once? Did it not get to backpropagation?");
-            assert(legal_moves_from_node.moves_left >= 1);
 
             if (selected_node == nullptr)
             {
                 selected_node = child_node;
-                selected_uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                selected_uct = UCT(child_node, number_of_branches, node_pool);
             }
             else if (from_node->controlled_type == ControlledType::CONTROLLED)
             {
-                r64 uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                r64 uct = UCT(child_node, number_of_branches, node_pool);
                 if (uct > selected_uct)
                 {
                     selected_node = child_node;
@@ -739,7 +704,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
             }
             else if (from_node->controlled_type == ControlledType::UNCONTROLLED)
             {
-                r64 uct = UCT(child_node, legal_moves_from_node.moves_left - 1, node_pool);
+                r64 uct = UCT(child_node, number_of_branches, node_pool);
                 // NOTE(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
                 if (uct < selected_uct)
                 {
@@ -755,24 +720,15 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
     }
 
     // NODE(david): if no neutral node -> choose an empty one if there is one
-    if (neutral_controlled_node == nullptr && neutral_uncontrolled_node == nullptr && empty_moves_size > 0)
+    bool found_empty_child_node = (cur_legal_moves_from_node.moves_left > 0);
+    if (neutral_controlled_node == nullptr && neutral_uncontrolled_node == nullptr && found_empty_child_node == true)
     {
-        // NOTE(david): found a move/node that hasn't been simulated yet -> uct is infinite -> choose this node
-        u32 random_move_offset = GetRandomNumber(0, empty_moves_size - 1);
-        Move random_move = Move::NONE;
-        for (u32 move_index = 0; move_index < empty_moves_size; ++move_index)
-        {
-            if (random_move_offset-- == 0)
-            {
-                random_move = empty_moves[move_index];
-                break ;
-            }
-        }
+        u32 random_move_index = GetRandomNumber(0, cur_legal_moves_from_node.moves_left - 1);
+        Move random_move = cur_legal_moves_from_node.moves[random_move_index];
         assert(random_move != Move::NONE);
 
         selected_node = _Expansion(from_node, node_pool);
         node_pool.AddChild(from_node, selected_node, random_move);
-
         return selected_node;
     }
 
@@ -837,7 +793,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
 
 // TODO(david): use transposition table to speed up the selection, which would store previous searches, allowing to avoid re-exploring parts of the tree that have already been searched
 // TODO(david): LRU?
-MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node, MoveProcessor move_processor, NodePool &node_pool)
+MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node, NodePool &node_pool)
 {
     SelectionResult selection_result = {};
 
@@ -864,6 +820,7 @@ MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node
         assert(current_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL && "if current node is a terminal type, we must have returned it already after _SelectChild");
         // Select a child node and its corresponding legal move based on maximum UCT value and some other heuristic
         Node *selected_child_node = _SelectChild(current_node, current_legal_moves, selection_result.movesequence_from_position, focus_on_lowest_utc_to_prune, node_pool);
+        assert(selected_child_node != nullptr);
 
         if (selected_child_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
         {
@@ -887,7 +844,7 @@ MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node
         selection_result.movesequence_from_position.moves[movesequence_index] = selected_child_node->move_to_get_here;
         ++selection_result.movesequence_from_position.number_of_moves;
 
-        move_processor(current_legal_moves, selected_child_node->move_to_get_here);
+        current_legal_moves.DeleteMove(selected_child_node->move_to_get_here);
 
         // NOTE(david): the selected child is an unexplored one
         if (selected_child_node->num_simulations == 0)
