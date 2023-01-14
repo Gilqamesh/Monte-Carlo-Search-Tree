@@ -42,8 +42,11 @@ struct TerminalInfo
 // using MoveSequence: vector<Move> -> { Move[Move::NONE], u32 }
 struct MoveSequence
 {
-    Move moves[Move::NONE];
+    static constexpr u32 moves_size = 32;
+    Move moves[moves_size];
     u32 number_of_moves;
+
+    void AddMove(Move move);
 };
 
 // NOTE(david): must be signed
@@ -75,22 +78,16 @@ struct NodePool
     NodeIndex *_free_nodes;
     NodeIndex _free_nodes_index;
 
-    struct HashResult
+    // NOTE(david): shouldn't be more than the max action space at any point
+    // TODO(david): should also be dynamic, as depending on the state, the action space is vastly different in size
+    static constexpr u32 allowed_branching_factor = 30;
+    struct ChildrenTables
     {
-        NodeIndex node_index;
-        Node *node;
-        Move move;
-    };
-    static constexpr u32 allowed_branching_factor = Move::NONE;
-    struct MoveToNodeTable
-    {
-        // TODO(david): store the moves as well, as that allows for linear probing to resolve collisions
         Node *children[allowed_branching_factor];
         u32 number_of_children;
-        // NodeIndex children[Move::NONE];
     };
 
-    MoveToNodeTable *_move_to_node_tables;
+    ChildrenTables *_move_to_node_tables;
 
 public:
     NodePool(NodeIndex number_of_nodes_to_allocate);
@@ -100,7 +97,7 @@ public:
     void FreeNode(Node *node);
 
     void AddChild(Node *node, Node *child, Move move);
-    MoveToNodeTable *GetChildren(Node *node);
+    ChildrenTables *GetChildren(Node *node);
     Node *GetParent(Node *node) const;
 
     void Clear();
@@ -131,7 +128,7 @@ private:
     };
 
     SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, NodePool &node_pool);
-    Node *_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, const MoveSequence &movesequence_from_position, bool focus_on_lowest_utc_to_prune, NodePool &node_pool);
+    Node *_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, bool focus_on_lowest_utc_to_prune, NodePool &node_pool);
     Node *_Expansion(Node *from_node, NodePool &node_pool);
     void _BackPropagate(Node *from_node, NodePool &node_pool);
 

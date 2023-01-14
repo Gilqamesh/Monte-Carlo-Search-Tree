@@ -7,38 +7,13 @@
 #include <string>
 #include <cstdlib>
 
-#define ArrayCount(array) (sizeof(array) / sizeof((array)[0]))
-
 static string MoveToWord(Move move)
 {
-    switch (move)
+    if (move.IsValid() == false)
     {
-    case TOP_LEFT:
-        return "TOP_LEFT";
-    case TOP_MID:
-        return "TOP_MID";
-    case TOP_RIGHT:
-        return "TOP_RIGHT";
-    case MID_LEFT:
-        return "MID_LEFT";
-    case MID_MID:
-        return "MID_MID";
-    case MID_RIGHT:
-        return "MID_RIGHT";
-    case BOTTOM_LEFT:
-        return "BOTTOM_LEFT";
-    case BOTTOM_MID:
-        return "BOTTOM_MID";
-    case BOTTOM_RIGHT:
-        return "BOTTOM_RIGHT";
-    case NONE:
         return "NONE";
-    default:
-    {
-        UNREACHABLE_CODE;
-        return "Breh";
     }
-    }
+    return "(" + to_string(move.col) + ", " + to_string(move.row) + ")";
 }
 
 static string TerminalTypeToWord(TerminalType terminal_type)
@@ -84,6 +59,12 @@ static string ControlledTypeToWord(ControlledType controlled_type)
     }
 }
 
+void MoveSequence::AddMove(Move move)
+{
+    assert(number_of_moves < ArrayCount(MoveSequence::moves) && "not enough space in the move sequence");
+    moves[number_of_moves++] = move;
+}
+
 ostream &operator<<(ostream &os, const Node *node)
 {
     LOGN(os, MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", sims: " << node->num_simulations << ", " << ControlledTypeToWord(node->controlled_type)) << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", terminal depth(W/L/N): (" << node->terminal_info.terminal_depth.winning << "," << node->terminal_info.terminal_depth.losing << "," << node->terminal_info.terminal_depth.neutral << ")";
@@ -111,7 +92,7 @@ NodePool::NodePool(NodeIndex number_of_nodes_to_allocate)
     }
 
     u32 move_to_node_hash_table_alignment = GetNextPowerOfTwo(sizeof(*_move_to_node_tables));
-    _move_to_node_tables = (MoveToNodeTable *)_aligned_malloc(_number_of_nodes_allocated * sizeof(*_move_to_node_tables), move_to_node_hash_table_alignment);
+    _move_to_node_tables = (ChildrenTables *)_aligned_malloc(_number_of_nodes_allocated * sizeof(*_move_to_node_tables), move_to_node_hash_table_alignment);
     if (_move_to_node_tables == nullptr)
     {
         throw runtime_error("couldn't allocate _move_to_node_tables in NodePool");
@@ -124,14 +105,6 @@ NodePool::NodePool(NodeIndex number_of_nodes_to_allocate)
         throw runtime_error("couldn't allocate _move_to_node_tables in NodePool");
     }
 
-    // for (u32 table_index = 0; table_index < _number_of_nodes_allocated; ++table_index)
-    // {
-    //     for (u32 child_index = 0; child_index < allowed_branching_factor; ++child_index)
-    //     {
-    //         _move_to_node_tables[table_index].children[child_index] = nullptr;
-    //     }
-    //     _move_to_node_tables[table_index].number_of_children = 0;
-    // }
     memset(_move_to_node_tables, 0, _number_of_nodes_allocated * sizeof(*_move_to_node_tables));
 }
 
@@ -165,7 +138,7 @@ static Node *InitializeNode(Node *node, Node *parent)
     node->terminal_info.terminal_type = TerminalType::NOT_TERMINAL;
     node->terminal_info.terminal_depth = {};
     node->controlled_type = ControlledType::NONE;
-    node->move_to_get_here = Move::NONE;
+    node->move_to_get_here.Invalidate();
 
     return node;
 }
@@ -204,8 +177,8 @@ void NodePool::FreeNode(Node *node)
 
 void NodePool::AddChild(Node *node, Node *child, Move move)
 {
-    MoveToNodeTable *table = &_move_to_node_tables[node->index];
-    assert(table->number_of_children < ArrayCount(MoveToNodeTable::children));
+    ChildrenTables *table = &_move_to_node_tables[node->index];
+    assert(table->number_of_children < ArrayCount(ChildrenTables::children));
     assert(table->children[table->number_of_children] == nullptr);
     table->children[table->number_of_children] = child;
 
@@ -214,7 +187,7 @@ void NodePool::AddChild(Node *node, Node *child, Move move)
     child->move_to_get_here = move;
 }
 
-NodePool::MoveToNodeTable *NodePool::GetChildren(Node *node)
+NodePool::ChildrenTables *NodePool::GetChildren(Node *node)
 {
     assert(node->index >= 0 && node->index < _available_node_index);
     return (&_move_to_node_tables[node->index]);
@@ -234,14 +207,6 @@ Node *NodePool::GetParent(Node *node) const
 
 void NodePool::Clear()
 {
-    // for (u32 table_index = 0; table_index < _available_node_index; ++table_index)
-    // {
-    //     for (u32 child_index = 0; child_index < allowed_branching_factor; ++child_index)
-    //     {
-    //         _move_to_node_tables[table_index].children[child_index] = nullptr;
-    //     }
-    //     _move_to_node_tables[table_index].number_of_children = 0;
-    // }
     memset(_move_to_node_tables, 0, _available_node_index * sizeof(*_move_to_node_tables));
     _available_node_index = 0;
     _free_nodes_index = -1;
@@ -257,7 +222,7 @@ static r64 UCT(Node *node, u32 number_of_branches, NodePool &node_pool)
 
     r64 result = 0.0;
 
-    r64 depth_weight = 0.0;
+    r64 depth_weight = 1.0 / (r32)node->depth;
     // TODO(david): think about this number and how it should affect explitation vs exploration
     // NOTE(david): go with exploration if there are a lot of branches and exploit more the less choices there are
     r64 number_of_branches_weight = 0.2 * number_of_branches;
@@ -284,12 +249,12 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
 
     assert(node_to_evaluate_from->controlled_type == ControlledType::CONTROLLED && "the strategy here is to win, so if it's an uncontrolled node than the strategy would be to choose the worst uct or losing move");
 
-    NodePool::MoveToNodeTable *children_nodes = node_pool.GetChildren(node_to_evaluate_from);
+    NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(node_to_evaluate_from);
     u32 number_of_branches = children_nodes->number_of_children;
     for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
     {
         Node *child = children_nodes->children[child_index];
-        assert(child != nullptr && child->move_to_get_here != Move::NONE);
+        assert(child != nullptr && child->move_to_get_here.IsValid());
 
         if (child->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
         {
@@ -304,12 +269,19 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
                     }
                     else if (current_highest_uct_node->terminal_info.terminal_type == TerminalType::LOSING)
                     {
-                        // TODO(david): choose the one with the higher terminal depth
-                        r64 uct = UCT(child, number_of_branches, node_pool);
-                        if (uct > highest_uct)
+                        // NOTE(david): choose the one with the higher terminal depth to lose as slowly as possible
+                        if (child->terminal_info.terminal_depth.losing > current_highest_uct_node->terminal_info.terminal_depth.losing)
                         {
                             highest_uct = uct;
                             current_highest_uct_node = child;
+                        }
+                        else if (child->terminal_info.terminal_depth.losing == current_highest_uct_node->terminal_info.terminal_depth.losing)
+                        {
+                            if (uct > highest_uct)
+                            {
+                                highest_uct = uct;
+                                current_highest_uct_node = child;                                
+                            }
                         }
                     }
                     else
@@ -318,7 +290,41 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
                     }
                 } break ;
                 case TerminalType::WINNING: {
-                    return child->move_to_get_here;
+                    // TODO(david): choose the one with the lowest terminal depth to win asap
+                    r64 uct = UCT(child, number_of_branches, node_pool);
+                    if (current_highest_uct_node == nullptr)
+                    {
+                        highest_uct = uct;
+                        current_highest_uct_node = child;
+                    }
+                    switch (current_highest_uct_node->terminal_info.terminal_type)
+                    {
+                        case TerminalType::WINNING: {
+                            // NOTE(david): select the winning move with the least terminal winning depth
+                            if (child->terminal_info.terminal_depth.winning < current_highest_uct_node->terminal_info.terminal_depth.winning)
+                            {
+                                current_highest_uct_node = child;
+                                highest_uct = uct;
+                            }
+                            else if (child->terminal_info.terminal_depth.winning == current_highest_uct_node->terminal_info.terminal_depth.winning)
+                            {
+                                if (uct > highest_uct)
+                                {
+                                    current_highest_uct_node = child;
+                                    highest_uct = uct;
+                                }
+                            }
+                        } break ;
+                        case TerminalType::LOSING:
+                        case TerminalType::NEUTRAL:
+                        case TerminalType::NOT_TERMINAL: {
+                            highest_uct = uct;
+                            current_highest_uct_node = child;
+                        } break ;
+                        default: {
+                            UNREACHABLE_CODE;
+                        }
+                    }
                 } break ;
                 case TerminalType::NEUTRAL: {
                     // NOTE(david): dispatching over the previous highest uct node's terminal type
@@ -331,7 +337,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
                     switch (current_highest_uct_node->terminal_info.terminal_type)
                     {
                         case TerminalType::WINNING: {
-                            assert(false && "should already have returned the move if it's a terminal winning move");
+                            // NOTE(david): select the winning move with the least terminal winning depth -> skip
                         } break ;
                         case TerminalType::LOSING: {
                             // NOTE(david): always replace losing moves with the current non-terminal move as there might be moves that aren't terminally losing
@@ -339,11 +345,19 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
                             current_highest_uct_node = child;
                         } break ;
                         case TerminalType::NEUTRAL: {
-                            assert(current_highest_uct_node != nullptr);
-                            if (uct > highest_uct)
+                            // NOTE(david): choose the one with the highest terminal depth for optimistic strategy (wait for opponent to make a mistake)
+                            if (child->terminal_info.terminal_depth.neutral > current_highest_uct_node->terminal_info.terminal_depth.neutral)
                             {
-                                highest_uct = uct;
                                 current_highest_uct_node = child;
+                                highest_uct = uct;
+                            }
+                            else if (child->terminal_info.terminal_depth.neutral == current_highest_uct_node->terminal_info.terminal_depth.neutral)
+                            {
+                                if (uct > highest_uct)
+                                {
+                                    current_highest_uct_node = child;
+                                    highest_uct = uct;
+                                }
                             }
                         } break ;
                         case TerminalType::NOT_TERMINAL: {
@@ -375,7 +389,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
                 switch (current_highest_uct_node->terminal_info.terminal_type)
                 {
                     case TerminalType::WINNING: {
-                        assert(false && "should already have returned the move if it's a terminal winning move");
+                        // NOTE(david): select the winning move with the least terminal winning depth -> skip
                     } break ;
                     case TerminalType::LOSING: {
                         // NOTE(david): always replace losing moves with the current non-terminal move as there might be moves that aren't terminally losing
@@ -425,11 +439,11 @@ static void DebugPrintDecisionTreeHelper(Node *from_node, Player player_to_move,
     // TODO(david): move depth to node
     LOG(tree_fs, string(depth * 4, ' ') << "(player to move: " << PlayerToWord(player_to_move) << ", depth: " << depth << ", " << from_node << ")");
 
-    NodePool::MoveToNodeTable *children_nodes = node_pool.GetChildren(from_node);
+    NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(from_node);
     for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
     {
         Node *child_node = children_nodes->children[child_index];
-        assert(child_node != nullptr && child_node->move_to_get_here != Move::NONE);
+        assert(child_node != nullptr && child_node->move_to_get_here.IsValid());
 
         DebugPrintDecisionTreeHelper(child_node, player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE, depth + 1, tree_fs, node_pool);
     }
@@ -447,7 +461,9 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
 {
     if (legal_moveset_at_root_node.moves_left == 0)
     {
-        return Move::NONE;
+        Move move;
+        move.Invalidate();
+        return move;
     }
     node_pool.Clear();
     _root_node = node_pool.AllocateNode(nullptr);
@@ -517,7 +533,7 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
     return result_move;
 }
 
-Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, const MoveSequence &movechain_from_state, bool focus_on_lowest_utc_to_prune, NodePool &node_pool)
+Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, bool focus_on_lowest_utc_to_prune, NodePool &node_pool)
 {
     /*
       if controlled     ->  if winning      -> choose this
@@ -546,7 +562,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
     Node *winning_node = nullptr;
     r64 winning_uct = INFINITY;
 
-    NodePool::MoveToNodeTable *children_nodes = node_pool.GetChildren(from_node);
+    NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(from_node);
     // TODO(david): dynamically control branching factor for example based on depth
     u32 number_of_branches = legal_moves_from_node.moves_left;
 
@@ -555,7 +571,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
     for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
     {
         Node *child_node = children_nodes->children[child_index];
-        assert(child_node != nullptr && child_node->move_to_get_here != Move::NONE);
+        assert(child_node != nullptr && child_node->move_to_get_here.IsValid());
 
         cur_legal_moves_from_node.DeleteMove(child_node->move_to_get_here);
 
@@ -720,12 +736,14 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
     }
 
     // NODE(david): if no neutral node -> choose an empty one if there is one
-    bool found_empty_child_node = (cur_legal_moves_from_node.moves_left > 0);
+    // NOTE(david): if there are still possible moves from the move set, but the children table isn't full yet
+    // TODO(david): dynamic sized children table, if it's necessary to have more children in a position, then the table shouldn't be bounded in size
+    bool found_empty_child_node = (cur_legal_moves_from_node.moves_left > 0 && children_nodes->number_of_children < ArrayCount(NodePool::ChildrenTables::children));
     if (neutral_controlled_node == nullptr && neutral_uncontrolled_node == nullptr && found_empty_child_node == true)
     {
         u32 random_move_index = GetRandomNumber(0, cur_legal_moves_from_node.moves_left - 1);
         Move random_move = cur_legal_moves_from_node.moves[random_move_index];
-        assert(random_move != Move::NONE);
+        assert(random_move.IsValid());
 
         selected_node = _Expansion(from_node, node_pool);
         node_pool.AddChild(from_node, selected_node, random_move);
@@ -819,7 +837,7 @@ MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node
 
         assert(current_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL && "if current node is a terminal type, we must have returned it already after _SelectChild");
         // Select a child node and its corresponding legal move based on maximum UCT value and some other heuristic
-        Node *selected_child_node = _SelectChild(current_node, current_legal_moves, selection_result.movesequence_from_position, focus_on_lowest_utc_to_prune, node_pool);
+        Node *selected_child_node = _SelectChild(current_node, current_legal_moves, focus_on_lowest_utc_to_prune, node_pool);
         assert(selected_child_node != nullptr);
 
         if (selected_child_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
@@ -839,18 +857,14 @@ MCST::SelectionResult MCST::_Selection(const MoveSet &legal_moveset_at_root_node
         }
 
         selection_result.selected_node = selected_child_node;
-
-        u32 movesequence_index = selection_result.movesequence_from_position.number_of_moves;
-        selection_result.movesequence_from_position.moves[movesequence_index] = selected_child_node->move_to_get_here;
-        ++selection_result.movesequence_from_position.number_of_moves;
-
-        current_legal_moves.DeleteMove(selected_child_node->move_to_get_here);
-
+        selection_result.movesequence_from_position.AddMove(selected_child_node->move_to_get_here);
         // NOTE(david): the selected child is an unexplored one
         if (selected_child_node->num_simulations == 0)
         {
             return selection_result;
         }
+
+        current_legal_moves.DeleteMove(selected_child_node->move_to_get_here);
 
         current_node = selected_child_node;
     }
@@ -882,42 +896,55 @@ static void _updateTerminalDepthForParentNode(Node *cur_node, Node *parent_node)
         parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
     }
 
-    if (parent_node->controlled_type == ControlledType::CONTROLLED)
+    if (cur_node->terminal_info.terminal_depth.winning < parent_node->terminal_info.terminal_depth.winning)
     {
-        // NOTE(david): Controlled Node favors winning, so it should choose the move that leads to the least amount of moves to win, and the move that leads to the most amount of moves to lose
-        if (cur_node->terminal_info.terminal_depth.winning < parent_node->terminal_info.terminal_depth.winning)
-        {
-            parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
-        }
-        if (cur_node->terminal_info.terminal_depth.losing > parent_node->terminal_info.terminal_depth.losing)
-        {
-            parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
-        }
-        if (cur_node->terminal_info.terminal_depth.neutral > parent_node->terminal_info.terminal_depth.neutral)
-        {
-            parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
-        }
+        parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
     }
-    else if (parent_node->controlled_type == ControlledType::UNCONTROLLED)
+    if (cur_node->terminal_info.terminal_depth.losing > parent_node->terminal_info.terminal_depth.losing)
     {
-        // NOTE(david): Uncontrolled Node favors losing outcome for us, so it should choose the move that leads to the most amount of moves that wins, and the move that leads to the least amount of moves to lose
-        if (cur_node->terminal_info.terminal_depth.winning > parent_node->terminal_info.terminal_depth.winning)
-        {
-            parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
-        }
-        if (cur_node->terminal_info.terminal_depth.losing < parent_node->terminal_info.terminal_depth.losing)
-        {
-            parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
-        }
-        if (cur_node->terminal_info.terminal_depth.neutral > parent_node->terminal_info.terminal_depth.neutral)
-        {
-            parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
-        }
+        parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
     }
-    else
+    if (cur_node->terminal_info.terminal_depth.neutral > parent_node->terminal_info.terminal_depth.neutral)
     {
-        UNREACHABLE_CODE;
+        parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
     }
+
+    // if (parent_node->controlled_type == ControlledType::CONTROLLED)
+    // {
+    //     // NOTE(david): Controlled Node favors winning, so it should choose the move that leads to the least amount of moves to win, and the move that leads to the most amount of moves to lose
+    //     if (cur_node->terminal_info.terminal_depth.winning < parent_node->terminal_info.terminal_depth.winning)
+    //     {
+    //         parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
+    //     }
+    //     if (cur_node->terminal_info.terminal_depth.losing > parent_node->terminal_info.terminal_depth.losing)
+    //     {
+    //         parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
+    //     }
+    //     if (cur_node->terminal_info.terminal_depth.neutral > parent_node->terminal_info.terminal_depth.neutral)
+    //     {
+    //         parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
+    //     }
+    // }
+    // else if (parent_node->controlled_type == ControlledType::UNCONTROLLED)
+    // {
+    //     // NOTE(david): Uncontrolled Node favors losing outcome for us, so it should choose the move that leads to the most amount of moves that wins, and the move that leads to the least amount of moves to lose
+    //     if (cur_node->terminal_info.terminal_depth.winning > parent_node->terminal_info.terminal_depth.winning)
+    //     {
+    //         parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
+    //     }
+    //     if (cur_node->terminal_info.terminal_depth.losing < parent_node->terminal_info.terminal_depth.losing)
+    //     {
+    //         parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
+    //     }
+    //     if (cur_node->terminal_info.terminal_depth.neutral > parent_node->terminal_info.terminal_depth.neutral)
+    //     {
+    //         parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
+    //     }
+    // }
+    // else
+    // {
+    //     UNREACHABLE_CODE;
+    // }
 }
 
 void MCST::_BackPropagate(Node *from_node, NodePool &node_pool)

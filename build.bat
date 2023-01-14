@@ -23,6 +23,7 @@ set DebugCompilerFlags=%GenerateIntrinsicFunctions%^
                        %EnhanceOptimizedDebugging%^
                        %FullSmbolicDebuggingInformation%^
                        %NoLogo%^
+                       %MaximizeSpeed%^
                        %EnableStandardCStackUnwinding%^
                        %MultithreadStaticRunTimeLibraryWithDebug%^
                        %CVersion%

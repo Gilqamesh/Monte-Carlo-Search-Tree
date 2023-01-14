@@ -22,6 +22,8 @@ using namespace std;
 #define DEBUG_PRINT
 #endif
 
+#define ArrayCount(array) (sizeof(array) / sizeof((array)[0]))
+
 #define LOG(os, msg) (os << msg << endl)
 #define LOGN(os, msg) (os << msg)
 #define LOGV(os, msg) (os << msg << " - " << __LINE__ << " " << __FILE__ << endl)
@@ -69,19 +71,39 @@ enum class Player
     NONE
 };
 
-enum Move
+constexpr u32 GRID_DIM_ROW = 5;
+constexpr u32 GRID_DIM_COL = 5;
+constexpr u32 ConnectToWinCount = 4;
+
+struct Move
 {
-    TOP_LEFT,
-    TOP_MID,
-    TOP_RIGHT,
-    MID_LEFT,
-    MID_MID,
-    MID_RIGHT,
-    BOTTOM_LEFT,
-    BOTTOM_MID,
-    BOTTOM_RIGHT,
-    NONE
+    u32 row;
+    u32 col;
+
+    bool IsValid(void);
+    void Invalidate(void);
 };
+
+bool operator==(const Move &a, const Move &b)
+{
+    return (a.row == b.row && a.col == b.col);
+}
+
+bool operator!=(const Move &a, const Move &b)
+{
+    return (a.row != b.row || a.col != b.col);
+}
+
+bool Move::IsValid(void)
+{
+    return !(row == 10000 && col == 10000); 
+}
+
+void Move::Invalidate(void)
+{
+    row = 10000;
+    col = 10000;
+}
 
 enum class GameOutcome
 {
@@ -91,17 +113,58 @@ enum class GameOutcome
     NONE
 };
 
-// using MoveToPlayerMap: unordered_map<Move, Player -> Player[Move::NONE]
-using MoveToPlayerMap = Player[Move::NONE];
+// NOTE(david): this doesn't apply to all games, but for board games where each grid is taken by 1 player is fine for now
+struct MoveToPlayerMap
+{
+    Player map[GRID_DIM_COL * GRID_DIM_ROW];
 
-// using MoveSet: unordered_set<Move> -> { Move[Move::NONE], u32 }
+    Player GetPlayer(u32 row, u32 col) const;
+    Player GetPlayer(Move move) const;
+    void   AddPlayer(Move move, Player player);
+    void   Clear(void);
+};
+
+Player MoveToPlayerMap::GetPlayer(u32 row, u32 col) const
+{
+    u32 map_index = row * GRID_DIM_COL + col;
+    assert(map_index < ArrayCount(MoveToPlayerMap::map));
+    return map[map_index];
+}
+
+Player MoveToPlayerMap::GetPlayer(Move move) const
+{
+    u32 map_index = move.row * GRID_DIM_COL + move.col;
+    assert(map_index < ArrayCount(MoveToPlayerMap::map));
+    return map[map_index];
+}
+
+void MoveToPlayerMap::AddPlayer(Move move, Player player)
+{
+    u32 map_index = move.row * GRID_DIM_COL + move.col;
+    assert(map_index < ArrayCount(MoveToPlayerMap::map));
+    map[map_index] = player;
+}
+
+void MoveToPlayerMap::Clear(void)
+{
+    for (u32 row = 0; row < GRID_DIM_ROW; ++row)
+    {
+        for (u32 col = 0; col < GRID_DIM_COL; ++col)
+        {
+            u32 map_index = row * GRID_DIM_COL + col;
+            map[map_index] = Player::NONE;
+        }
+    }
+}
+
 struct MoveSet
 {
-    // TODO(david): this might not need to depend on the size of the moveset
-    Move  moves[Move::NONE];
+    // TODO(david): may want a dynamic size structure as this can get big or may want to store the action space differently and with more domain knowledge
+    Move  moves[GRID_DIM_ROW * GRID_DIM_COL];
     u32   moves_left;
 
     void  DeleteMove(Move move);
+    void  AddMove(Move move);
 };
 
 void MoveSet::DeleteMove(Move move)
@@ -111,14 +174,22 @@ void MoveSet::DeleteMove(Move move)
     {
         if (moves[move_index] == move)
         {
-            assert(moves[move_index] != Move::NONE);
+            assert(moves[move_index].IsValid());
             moves[move_index] = moves[moves_left - 1];
-            moves[moves_left - 1] = Move::NONE;
+            moves[moves_left - 1].Invalidate();
             --moves_left;
             return ;
         }
     }
     assert(false && "tried to delete a move that didn't exist");
+}
+
+void MoveSet::AddMove(Move move)
+{
+    u32 move_index = move.row * GRID_DIM_COL + move.col;
+    assert(move_index < ArrayCount(MoveSet::moves));
+    moves[move_index] = move;
+    ++moves_left;
 }
 
 struct GameState
@@ -169,12 +240,11 @@ static string GameOutcomeToWord(GameOutcome game_outcome)
 
 void PrintGameState(const GameState &game_state, ostream &os)
 {
-    for (u32 row = 0; row < 3; ++row)
+    for (u32 row = 0; row < GRID_DIM_ROW; ++row)
     {
-        for (u32 column = 0; column < 3; ++column)
+        for (u32 col = 0; col < GRID_DIM_COL; ++col)
         {
-            Move inspected_move = static_cast<Move>(row * 3 + column);
-            Player player_that_made_move = game_state.move_to_player_map[inspected_move];
+            Player player_that_made_move = game_state.move_to_player_map.GetPlayer(row, col);
             if (player_that_made_move != Player::NONE)
             {
                 LOGN(os, (player_that_made_move == Player::CIRCLE ? "O" : "X"));
@@ -189,75 +259,141 @@ void PrintGameState(const GameState &game_state, ostream &os)
     }
 }
 
-GameOutcome DetermineGameOutcome(GameState &game_state, Player previous_player)
+GameOutcome DetermineGameOutcome(GameState &game_state, Player player_to_win)
 {
     bool is_draw = true;
-    auto check_for_player_wincon = [&game_state, &is_draw](Move predicate_moves[3], Player predicate)
+    // check rows/cols
+    for (u32 row = 0; row < GRID_DIM_ROW; ++row)
     {
-        for (u32 i = 0; i < 3; ++i)
+        u32 cur_circles = 0;
+        u32 cur_crosses = 0;
+        for (u32 col = 0; col < GRID_DIM_COL; ++col)
         {
-            Player player = game_state.move_to_player_map[predicate_moves[i]];
-            if (player == Player::NONE)
+            Player cur_player = game_state.move_to_player_map.GetPlayer(row, col);
+            if (cur_player == Player::CIRCLE)
+            {
+                if (++cur_circles == ConnectToWinCount)
+                {
+                    return player_to_win == Player::CIRCLE ? GameOutcome::WIN : GameOutcome::LOSS;
+                }
+                cur_crosses = 0;
+            }
+            else if (cur_player == Player::CROSS)
+            {
+                if (++cur_crosses == ConnectToWinCount)
+                {
+                    return player_to_win == Player::CROSS ? GameOutcome::WIN : GameOutcome::LOSS;
+                }
+                cur_circles = 0;
+            }
+            else
             {
                 is_draw = false;
-            }
-            if (player != predicate)
-            {
-                return false;
+                cur_crosses = 0;
+                cur_circles = 0;
             }
         }
-
-        return true;
-    };
-
-    for (i32 row_orientation = 0; row_orientation < 2; ++row_orientation)
+    }
+    for (u32 col = 0; col < GRID_DIM_COL; ++col)
     {
-        i32 col_term = (row_orientation == 0 ? 3 : 1);
-        i32 row_term = (row_orientation == 0 ? 1 : 3);
-        for (i32 row_index = 0; row_index < 3; ++row_index)
+        u32 cur_circles = 0;
+        u32 cur_crosses = 0;
+        for (u32 row = 0; row < GRID_DIM_ROW; ++row)
         {
-            Move predicate_moves[3];
-            for (i32 column_index = 0; column_index < 3; ++column_index)
+            Player cur_player = game_state.move_to_player_map.GetPlayer(row, col);
+            if (cur_player == Player::CIRCLE)
             {
-                i32 move_index = row_term * row_index + col_term * column_index;
-                assert(move_index < Move::NONE);
-                Move move = static_cast<Move>(move_index);
-                predicate_moves[column_index] = move;
+                if (++cur_circles == ConnectToWinCount)
+                {
+                    return player_to_win == Player::CIRCLE ? GameOutcome::WIN : GameOutcome::LOSS;
+                }
+                cur_crosses = 0;
             }
-
-            // TODO: could check for all Player in one iteration, as if one symbol isn't the matched one, it automatically turns the corresponding boolean to false
-            if (check_for_player_wincon(predicate_moves, Player::CROSS))
+            else if (cur_player == Player::CROSS)
             {
-                return previous_player == Player::CROSS ? GameOutcome::WIN : GameOutcome::LOSS;
+                if (++cur_crosses == ConnectToWinCount)
+                {
+                    return player_to_win == Player::CROSS ? GameOutcome::WIN : GameOutcome::LOSS;
+                }
+                cur_circles = 0;
             }
-            if (check_for_player_wincon(predicate_moves, Player::CIRCLE))
+            else
             {
-                return previous_player == Player::CIRCLE ? GameOutcome::WIN : GameOutcome::LOSS;
+                is_draw = false;
+                cur_crosses = 0;
+                cur_circles = 0;
             }
         }
     }
 
     // check diagonals
-    for (i32 direction = 0; direction < 2; ++direction)
+    for (u32 start_col = 0, start_row_offset = 0; start_col < GRID_DIM_COL || start_row_offset < GRID_DIM_ROW; ++start_col)
     {
-        i32 a = (direction == 0) ? 4 : 0;
-        i32 b = (direction == 0) ? 0 : 2;
-        Move predicate_moves[3] = {};
-        for (i32 i = 0; i < 3; ++i)
+        if (start_col == GRID_DIM_COL)
         {
-            i32 move_index = i * a + b * (i + 1);
-            assert(move_index < Move::NONE);
-            Move move = static_cast<Move>(move_index);
-            predicate_moves[i] = move;
+            start_col = GRID_DIM_COL - 1;
+            ++start_row_offset;
+        }
+        u32 cur_circles = 0;
+        u32 cur_crosses = 0;
+        for (i32 col = start_col, row = GRID_DIM_ROW - 1 - start_row_offset;
+             col >= 0 && row >= 0;
+             --col, --row)
+        {
+            Player cur_player = game_state.move_to_player_map.GetPlayer(row, col);
+            if (cur_player == Player::CIRCLE)
+            {
+                if (++cur_circles == ConnectToWinCount)
+                {
+                    return player_to_win == Player::CIRCLE ? GameOutcome::WIN : GameOutcome::LOSS;
+                }
+                cur_crosses = 0;
+            }
+            else if (cur_player == Player::CROSS)
+            {
+                if (++cur_crosses == ConnectToWinCount)
+                {
+                    return player_to_win == Player::CROSS ? GameOutcome::WIN : GameOutcome::LOSS;
+                }
+                cur_circles = 0;
+            }
+            else
+            {
+                is_draw = false;
+                cur_crosses = 0;
+                cur_circles = 0;
+            }
         }
 
-        if (check_for_player_wincon(predicate_moves, Player::CROSS))
+        cur_circles = 0;
+        cur_crosses = 0;
+        for (i32 col = start_col, row = start_row_offset;
+             col >= 0 && row < GRID_DIM_ROW;
+             --col, ++row)
         {
-            return previous_player == Player::CROSS ? GameOutcome::WIN : GameOutcome::LOSS;
-        }
-        if (check_for_player_wincon(predicate_moves, Player::CIRCLE))
-        {
-            return previous_player == Player::CIRCLE ? GameOutcome::WIN : GameOutcome::LOSS;
+            Player cur_player = game_state.move_to_player_map.GetPlayer(row, col);
+            if (cur_player == Player::CIRCLE)
+            {
+                if (++cur_circles == ConnectToWinCount)
+                {
+                    return player_to_win == Player::CIRCLE ? GameOutcome::WIN : GameOutcome::LOSS;
+                }
+                cur_crosses = 0;
+            }
+            else if (cur_player == Player::CROSS)
+            {
+                if (++cur_crosses == ConnectToWinCount)
+                {
+                    return player_to_win == Player::CROSS ? GameOutcome::WIN : GameOutcome::LOSS;
+                }
+                cur_circles = 0;
+            }
+            else
+            {
+                is_draw = false;
+                cur_crosses = 0;
+                cur_circles = 0;
+            }
         }
     }
 
@@ -286,7 +422,7 @@ void simulation_from_position_once(const MoveSequence &movesequence_from_positio
         for (u32 movesequence_index = 0; movesequence_index < movesequence_from_position.number_of_moves; ++movesequence_index)
         {
             Move move = movesequence_from_position.moves[movesequence_index];
-            assert(move != Move::NONE);
+            assert(move.IsValid());
             LOGN(g_simresult_fs, MoveToWord(move) << " ");
         }
         LOG(g_simresult_fs, "");
@@ -308,8 +444,8 @@ void simulation_from_position_once(const MoveSequence &movesequence_from_positio
         {
             Move move = movesequence_from_position.moves[movesequence_index++];
 
-            assert(cur_game_state.move_to_player_map[move] == Player::NONE);
-            cur_game_state.move_to_player_map[move] = cur_game_state.player_to_move;
+            assert(cur_game_state.move_to_player_map.GetPlayer(move) == Player::NONE);
+            cur_game_state.move_to_player_map.AddPlayer(move, cur_game_state.player_to_move);
 
             cur_game_state.legal_moveset.DeleteMove(move);
         }
@@ -322,11 +458,11 @@ void simulation_from_position_once(const MoveSequence &movesequence_from_positio
 
             u32 random_move_index = GetRandomNumber(0, cur_game_state.legal_moveset.moves_left - 1);
             Move random_move = cur_game_state.legal_moveset.moves[random_move_index];
-            assert(random_move != Move::NONE);
+            assert(random_move.IsValid());
             cur_game_state.legal_moveset.DeleteMove(random_move);
 
-            assert(cur_game_state.move_to_player_map[random_move] == Player::NONE);
-            cur_game_state.move_to_player_map[random_move] = cur_game_state.player_to_move;
+            assert(cur_game_state.move_to_player_map.GetPlayer(random_move) == Player::NONE);
+            cur_game_state.move_to_player_map.AddPlayer(random_move, cur_game_state.player_to_move);
         }
 
         last_player_to_move = cur_game_state.player_to_move;
@@ -446,13 +582,14 @@ static void InitializeGameState(GameState *game_state)
 {
     *game_state = {};
     game_state->player_to_move = Player::CIRCLE;
-    for (u32 move_index = 0; move_index < ArrayCount(game_state->legal_moveset.moves); ++move_index)
+    game_state->move_to_player_map.Clear();
+    for (u32 row = 0; row < GRID_DIM_ROW; ++row)
     {
-        game_state->move_to_player_map[move_index] = Player::NONE;
-
-        Move move = static_cast<Move>(move_index);
-        game_state->legal_moveset.moves[move_index] = move;
-        ++game_state->legal_moveset.moves_left;
+        for (u32 col = 0; col < GRID_DIM_COL; ++col)
+        {
+            Move move = { row, col };
+            game_state->legal_moveset.AddMove(move);
+        }
     }
     Player previous_player = game_state->player_to_move == Player::CIRCLE ? Player::CROSS : Player::CIRCLE;
     game_state->outcome_for_previous_player = DetermineGameOutcome(*game_state, previous_player);
@@ -465,7 +602,7 @@ struct GameWindow
 };
 
 bool g_finished_evaluation = false;
-Move g_selected_move = Move::NONE;
+Move g_selected_move;
 bool g_evaluate_thread_is_working = false;
 thread g_evaluate_thread;
 
@@ -513,8 +650,8 @@ static void UpdateMove(GameState *game_state, Move move)
 {
     game_state->legal_moveset.DeleteMove(move);
 
-    assert(game_state->move_to_player_map[move] == Player::NONE);
-    game_state->move_to_player_map[move] = game_state->player_to_move;
+    assert(game_state->move_to_player_map.GetPlayer(move) == Player::NONE);
+    game_state->move_to_player_map.AddPlayer(move, game_state->player_to_move);
 
     game_state->outcome_for_previous_player = DetermineGameOutcome(*game_state, game_state->player_to_move);
 
@@ -552,7 +689,7 @@ static void UpdateMove(GameState *game_state, Move move)
 
 static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_pool, GameWindow *game_window)
 {
-    constexpr std::chrono::milliseconds max_evaluation_time = 2000ms;
+    constexpr std::chrono::milliseconds max_evaluation_time = 20000ms;
     if (game_state->outcome_for_previous_player == GameOutcome::NONE)
     {
         if (game_state->player_to_move == Player::CROSS)
@@ -562,7 +699,7 @@ static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_po
 
                 if (g_evaluate_thread_is_working == false)
                 {
-                    g_selected_move = Move::NONE;
+                    g_selected_move.Invalidate();
                     g_evaluate_thread_is_working = true;
                     g_evaluate_thread = thread([](GameState *game_state, MCST *mcst, NodePool *node_pool, std::chrono::milliseconds max_evaluation_time) {
                         EvaluateMove(game_state, mcst, node_pool, max_evaluation_time);
@@ -573,7 +710,7 @@ static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_po
             {
                 g_evaluate_thread.join();
                 g_evaluate_thread_is_working = false;
-                if (g_selected_move != Move::NONE)
+                if (g_selected_move.IsValid())
                 {
                     g_finished_evaluation = false;
 
@@ -587,11 +724,10 @@ static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_po
             Vector2 mouse_position = GetMousePosition();
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             {
-                u32 selected_grid_col = (u32)(mouse_position.x * 3.0f / game_window->width);
-                u32 selected_grid_row = (u32)(mouse_position.y * 3.0f / game_window->height);
-                u32 selected_move_index = selected_grid_row * 3 + selected_grid_col;
-                Move selected_move = (Move)selected_move_index;
-                if (game_state->move_to_player_map[selected_move] == Player::NONE)
+                u32 selected_grid_col = (u32)(mouse_position.x * GRID_DIM_COL / game_window->width);
+                u32 selected_grid_row = (u32)(mouse_position.y * GRID_DIM_ROW / game_window->height);
+                Move selected_move = { selected_grid_row, selected_grid_col };
+                if (game_state->move_to_player_map.GetPlayer(selected_move) == Player::NONE)
                 {
                     UpdateMove(game_state, selected_move);
                 }
@@ -609,25 +745,27 @@ static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_po
 
 static void RenderGameState(GameState *game_state, GameWindow *game_window)
 {
-    for (u32 i = 0; i < 2; ++i)
+    for (u32 row = 0; row < GRID_DIM_ROW - 1; ++row)
     {
-        Vector2 horizontal_start = { 0.0f, (r32)game_window->height * (i + 1) / 3.0f };
-        Vector2 horizontal_end = { (r32)game_window->width, (r32)game_window->height * (i + 1) / 3.0f };
+        Vector2 horizontal_start = { 0.0f, (r32)game_window->height * (row + 1) / (r32)GRID_DIM_ROW };
+        Vector2 horizontal_end = { (r32)game_window->width, (r32)game_window->height * (row + 1) / (r32)GRID_DIM_ROW };
         DrawLineEx(horizontal_start, horizontal_end, 5.0f, BLACK);
-
-        Vector2 vertical_start = { (r32)game_window->width * (i + 1) / 3.0f, 0.0f };
-        Vector2 vertical_end = { (r32)game_window->width * (i + 1) / 3.0f, (r32)game_window->height };
+    }
+    for (u32 col = 0; col < GRID_DIM_COL - 1; ++col)
+    {
+        Vector2 vertical_start = { (r32)game_window->width * (col + 1) / (r32)GRID_DIM_COL, 0.0f };
+        Vector2 vertical_end = { (r32)game_window->width * (col + 1) / (r32)GRID_DIM_COL, (r32)game_window->height };
         DrawLineEx(vertical_start, vertical_end, 5.0f, BLACK);
     }
 
-    for (u32 rows = 0; rows < 3; ++rows)
+    for (u32 row = 0; row < GRID_DIM_ROW; ++row)
     {
-        for (u32 cols = 0; cols < 3; ++cols)
+        for (u32 col = 0; col < GRID_DIM_COL; ++col)
         {
-            u32 move_index = rows * 3 + cols;
-            Vector2 grid_offset = { (r32)game_window->width / 3.0f * (r32)cols, (r32)game_window->height / 3.0f * (r32)rows };
-            Vector2 grid_size   = { (r32)game_window->width / 3.0f, (r32)game_window->height / 3.0f };
-            switch (game_state->move_to_player_map[move_index])
+            Move move = { row, col };
+            Vector2 grid_offset = { (r32)game_window->width / (r32)GRID_DIM_COL * (r32)col, (r32)game_window->height / (r32)GRID_DIM_ROW * (r32)row };
+            Vector2 grid_size   = { (r32)game_window->width / (r32)GRID_DIM_COL, (r32)game_window->height / (r32)GRID_DIM_ROW };
+            switch (game_state->move_to_player_map.GetPlayer(move))
             {
                 case Player::CIRCLE: {
                     DrawEllipseLines(grid_size.x / 2.0f + grid_offset.x, grid_size.y / 2.0f + grid_offset.y, grid_size.x / 2.0f, grid_size.y / 2.0f, RED);
@@ -653,7 +791,7 @@ i32 main()
 
     SetTargetFPS(60);
 
-    constexpr NodeIndex node_pool_size = 65536;
+    constexpr NodeIndex node_pool_size = 1048576;
     NodePool node_pool(node_pool_size);
     MCST mcst;
 
@@ -662,6 +800,7 @@ i32 main()
     // u32 number_of_draws = 0;
     gen.seed(0);
     GameState game_state;
+    g_selected_move.Invalidate();
     InitializeGameState(&game_state);
     while (WindowShouldClose() == false)
     {
