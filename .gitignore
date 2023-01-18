@@ -1,3 +1,6 @@
 build/*
 debug/*
+!build/raylib.dll
+!build/raylib.lib
+!**gitkeep
 # TODO: ignore everything, and keep a list of files that needs to be pushed
