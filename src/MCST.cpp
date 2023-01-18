@@ -7,24 +7,59 @@
 #include <string>
 #include <cstdlib>
 
-static inline pair<r64, r64>
-WilsonScoreInterval(Node *node) {
-    constexpr r64 confidence = 0.95;
+// static r64 g_tuned_exploration_factor_weight = 0.422;
+static r64 g_tuned_exploration_factor_weight = 1.0;
+static r64 UCT(Node *node, u32 number_of_branches)
+{
+    /*
+        parent num of simulations | max exploration factor (child num of simulation is 1)
+                                1 | 0
+                               10 | 1.51743
+                              100 | 2.14597
+                            1.000 | 2.62826
+                           10.000 | 3.03485
+                          100.000 | 3.39307
+                        1.000.000 | 3.71692
+                       10.000.000 | 4.01473
+    */
+    assert(node != nullptr);
+    assert(node->parent != nullptr && "don't care about root uct, as the root node isn't a possible move, so there is no reason to compare its uct");
+    assert(node->num_simulations != 0);
 
-    r64 mean = (r64)node->value / (r64)node->num_simulations;
+    r64 result = 0.0;
 
-    r64 standard_deviation = sqrt(node->variance);
+    r64 depth_weight = 1.0 / (r32)node->depth;
+    // TODO(david): think about this number and how it should affect explitation vs exploration
+    // NOTE(david): go with exploration if there are a lot of branches and exploit more the less choices there are
+    // r64 number_of_branches_weight = 0.2 * number_of_branches;
+    r64 number_of_branches_weight = 1.0;
+    // r64 weighted_exploration_factor = number_of_branches_weight * g_tuned_exploration_factor_weight * EXPLORATION_FACTOR / (node->depth * depth_weight);
+    assert(node->parent != nullptr);
+    result = (r64)node->value / (r64)node->num_simulations +
+             EXPLORATION_FACTOR * sqrt(log((r64)node->parent->num_simulations) / (r64)node->num_simulations);
 
-    r64 confidence_level_deviation = -1.0 * std::erf(-1 * (confidence / sqrt(2)));
-
-    r64 interval = confidence_level_deviation * (standard_deviation / sqrt((r64)node->num_simulations));
-
-    return { mean - interval, mean + interval };
+    return result;
 }
 
-inline pair<r64, r64> ConfidenceInterval(Node *node)
+static r64 UCT_Uncontrolled(Node *node, u32 number_of_branches)
 {
-    return WilsonScoreInterval(node);
+    // NOTE(david): favors low exploit and normal explore
+    assert(node != nullptr);
+    assert(node->parent != nullptr && "don't care about root uct, as the root node isn't a possible move, so there is no reason to compare its uct");
+    assert(node->num_simulations != 0);
+
+    r64 result = 0.0;
+
+    r64 depth_weight = 1.0 / (r32)node->depth;
+    // TODO(david): think about this number and how it should affect explitation vs exploration
+    // NOTE(david): go with exploration if there are a lot of branches and exploit more the less choices there are
+    // r64 number_of_branches_weight = 0.2 * number_of_branches;
+    r64 number_of_branches_weight = 1.0;
+    // r64 weighted_exploration_factor = number_of_branches_weight * g_tuned_exploration_factor_weight * EXPLORATION_FACTOR / (node->depth * depth_weight);
+    assert(node->parent != nullptr);
+    result = EXPLORATION_FACTOR * sqrt(log((r64)node->parent->num_simulations) / (r64)node->num_simulations) - (r64)node->value / (r64)node->num_simulations;
+
+    return result;
 }
 
 static string MoveToWord(Move move)
@@ -87,8 +122,7 @@ void MoveSequence::AddMove(Move move)
 
 ostream &operator<<(ostream &os, Node *node)
 {
-    pair <r64, r64> interval = ConfidenceInterval(node);
-    LOGN(os, "index: " << node->index << ", parent index: " << node->parent << ", " << MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", sims: " << node->num_simulations << ", " << ControlledTypeToWord(node->controlled_type)) << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", terminal depth(W/L/N): (" << node->terminal_info.terminal_depth.winning << "," << node->terminal_info.terminal_depth.losing << "," << node->terminal_info.terminal_depth.neutral << "), variance: " << node->variance << ", interval: [" << interval.first << ", " << interval.second << "], interval width: " << interval.second - interval.first;
+    LOGN(os, "index: " << node->index << ", " << MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", sims: " << node->num_simulations << ", " << ControlledTypeToWord(node->controlled_type)) << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", terminal depth(W/L/N): (" << node->terminal_info.terminal_depth.winning << "," << node->terminal_info.terminal_depth.losing << "," << node->terminal_info.terminal_depth.neutral << "), uct: " << (node->parent == nullptr ? 0.0 : (node->controlled_type == ControlledType::UNCONTROLLED ? UCT(node, 0) : UCT_Uncontrolled(node, 0)));
 
     return os;
 }
@@ -158,16 +192,14 @@ static Node *InitializeNode(Node *node, Node *parent)
     // TODO(david): separate persistent and transient data in Node
     node->value = 0.0;
     node->num_simulations = 0;
-    node->variance = 0.0;
+    node->parent = parent;
     if (parent)
     {
-        node->parent = parent->index;
         node->depth = parent->depth + 1;
     }
     else
     {
         node->depth = 0;
-        node->parent = -1;
     }
     node->terminal_info.terminal_type = TerminalType::NOT_TERMINAL;
     node->terminal_info.terminal_depth = {};
@@ -220,9 +252,9 @@ void NodePool::FreeNodeHelper(Node *node)
 
 void NodePool::FreeNode(Node *node)
 {
-    if (node->parent != -1)
+    if (node->parent)
     {
-        ChildrenTables *children_table = &_move_to_node_tables[node->parent];
+        ChildrenTables *children_table = &_move_to_node_tables[node->parent->index];
         bool debug_make_sure_child_is_found = false;
         for (u32 child_index = 0; child_index < children_table->number_of_children; ++child_index)
         {
@@ -262,18 +294,6 @@ NodePool::ChildrenTables *NodePool::GetChildren(Node *node)
     return (&_move_to_node_tables[node->index]);
 }
 
-Node *NodePool::GetParent(Node *node) const
-{
-    Node *parent_node = nullptr;
-
-    if (node->parent != -1)
-    {
-        parent_node = &_nodes[node->parent];
-    }
-
-    return parent_node;
-}
-
 void NodePool::Clear()
 {
     for (u32 table_index = 0; table_index < _available_node_index; ++table_index)
@@ -296,48 +316,6 @@ u32 NodePool::CurrentAllocatedNodes(void)
 
     assert(_available_node_index >= current_available_free_nodes);
     return _available_node_index - current_available_free_nodes;
-}
-
-// static r64 g_tuned_exploration_factor_weight = 0.422;
-static r64 g_tuned_exploration_factor_weight = 1.0;
-static r64 UCT(Node *node, u32 number_of_branches, NodePool &node_pool)
-{
-    assert(node != nullptr);
-    assert(node->parent != -1);
-    assert(node->num_simulations != 0);
-
-    r64 result = 0.0;
-
-    // TODO(david): think about how to incorporate the interval width into the exploration constant, it makes sense to focus on exploration the narrower the interval and focus more on exploitation the broader the interval in order to narrow it down
-    pair<r64, r64> confidence_interval = ConfidenceInterval(node);
-    r64 confidence_interval_width = confidence_interval.second - confidence_interval.first;
-    if (confidence_interval_width < 0.0)
-    {
-        LOG(cerr, confidence_interval_width << " " << confidence_interval.first << " " << confidence_interval.second);
-        assert(confidence_interval_width >= 0.0);
-    }
-    constexpr r64 average_confidence_interval = 10.0;
-    // NOTE(david): so that we don't divide by 0
-    constexpr r64 confidence_interval_epsilon = 0.000001;
-    r64 confidence_interval_to_exploration_factor_weight = average_confidence_interval / (confidence_interval_width + confidence_interval_epsilon);
-    if (confidence_interval_width == 0.0)
-    {
-        confidence_interval_to_exploration_factor_weight = 1.0;
-    }
-    confidence_interval_to_exploration_factor_weight = 1.0;
-
-    r64 depth_weight = 1.0 / (r32)node->depth;
-    // TODO(david): based on confidence interval, the narrower the interval, the lower the exploration factor to put more emphasis on exploration when there is higher uncertainty
-    // TODO(david): think about this number and how it should affect explitation vs exploration
-    // NOTE(david): go with exploration if there are a lot of branches and exploit more the less choices there are
-    r64 number_of_branches_weight = 0.2 * number_of_branches;
-    r64 weighted_exploration_factor = confidence_interval_to_exploration_factor_weight * number_of_branches_weight * g_tuned_exploration_factor_weight * EXPLORATION_FACTOR / (node->depth * depth_weight);
-    Node *parent_node = node_pool.GetParent(node);
-    assert(parent_node != nullptr);
-    result = (r64)node->value / (r64)node->num_simulations +
-             weighted_exploration_factor * sqrt(log((r64)parent_node->num_simulations) / (r64)node->num_simulations);
-
-    return result;
 }
 
 // TODO(david): implement
@@ -366,7 +344,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
             switch (child->terminal_info.terminal_type)
             {
                 case TerminalType::LOSING: {
-                    r64 uct = UCT(child, number_of_branches, node_pool);
+                    r64 uct = UCT(child, number_of_branches);
                     if (current_highest_uct_node == nullptr)
                     {
                         highest_uct = uct;
@@ -396,7 +374,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
                 } break ;
                 case TerminalType::WINNING: {
                     // TODO(david): choose the one with the lowest terminal depth to win asap
-                    r64 uct = UCT(child, number_of_branches, node_pool);
+                    r64 uct = UCT(child, number_of_branches);
                     if (current_highest_uct_node == nullptr)
                     {
                         highest_uct = uct;
@@ -433,7 +411,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
                 } break ;
                 case TerminalType::NEUTRAL: {
                     // NOTE(david): dispatching over the previous highest uct node's terminal type
-                    r64 uct = UCT(child, number_of_branches, node_pool);
+                    r64 uct = UCT(child, number_of_branches);
                     if (current_highest_uct_node == nullptr)
                     {
                         highest_uct = uct;
@@ -482,7 +460,7 @@ static Move _EvaluateBasedOnUCT(Node *node_to_evaluate_from, NodePool &node_pool
         }
         else
         {
-            r64 uct = UCT(child, number_of_branches, node_pool);
+            r64 uct = UCT(child, number_of_branches);
             if (current_highest_uct_node == nullptr)
             {
                 highest_uct = uct;
@@ -541,10 +519,10 @@ MCST::MCST()
 
 static void DebugPrintDecisionTreeHelper(Node *from_node, Player player_to_move, ofstream &tree_fs, NodePool &node_pool)
 {
-    // if (depth > 5)
-    // {
-    //     return ;
-    // }
+    if (from_node->depth > 3)
+    {
+        return ;
+    }
     LOG(tree_fs, string(from_node->depth * 4, ' ') << "(player to move: " << PlayerToWord(player_to_move) << ", depth: " << from_node->depth << ", " << from_node << ")");
 
     NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(from_node);
@@ -605,22 +583,24 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
                 break ;
             }
 
-            simulation_result.value = selection_result.selected_node->value;
+            // simulation_result.value = selection_result.selected_node->value;
 
-            // // TODO(david): these values should be set by some function by the user of MCST
-            // switch (selection_result.selected_node->terminal_info.terminal_type)
-            // {
-            //     case TerminalType::WINNING: {
-            //         simulation_result.value = 1.0;
-            //     } break ;
-            //     case TerminalType::LOSING: {
-            //         simulation_result.value = -1.0;
-            //     } break ;
-            //     case TerminalType::NEUTRAL: {
-            //         simulation_result.value = 0.0;
-            //     } break ;
-            //     default: UNREACHABLE_CODE;
-            // }
+            // TODO(david): these values should be set by some function by the user of MCST
+            // IMPORTANT(david): think about these values.. how to propagate back? value and num_simulations is high if I don't reset these
+            switch (selection_result.selected_node->terminal_info.terminal_type)
+            {
+                case TerminalType::WINNING: {
+                    simulation_result.value = 1.0;
+                } break ;
+                case TerminalType::LOSING: {
+                    simulation_result.value = -1.0;
+                } break ;
+                case TerminalType::NEUTRAL: {
+                    simulation_result.value = 0.0;
+                } break ;
+                default: UNREACHABLE_CODE;
+            }
+            selection_result.selected_node->num_simulations = 1;
 
 // #if defined(DEBUG_WRITE_OUT)
 //             DebugPrintDecisionTree(_root_node, g_move_counter, node_pool);
@@ -729,13 +709,13 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     if (winning_node == nullptr)
                     {
                         winning_node = child_node;
-                        winning_uct = UCT(child_node, number_of_branches, node_pool);
+                        winning_uct = UCT_Uncontrolled(child_node, number_of_branches);
                     }
                     else
                     {
-                        r64 uct = UCT(child_node, number_of_branches, node_pool);
-                        // TODO(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
-                        if (uct < winning_uct)
+                        r64 uct = UCT_Uncontrolled(child_node, number_of_branches);
+                        // NOTE(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
+                        if (uct > winning_uct)
                         {
                             winning_node = child_node;
                             winning_uct = uct;
@@ -756,11 +736,11 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     if (neutral_controlled_node == nullptr)
                     {
                         neutral_controlled_node = child_node;
-                        neutral_controlled_uct = UCT(child_node, number_of_branches, node_pool);
+                        neutral_controlled_uct = UCT(child_node, number_of_branches);
                     }
                     else
                     {
-                        r64 uct = UCT(child_node, number_of_branches, node_pool);
+                        r64 uct = UCT(child_node, number_of_branches);
                         if (uct > neutral_controlled_uct)
                         {
                             neutral_controlled_node = child_node;
@@ -773,13 +753,13 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     if (neutral_uncontrolled_node == nullptr)
                     {
                         neutral_uncontrolled_node = child_node;
-                        neutral_uncontrolled_uct = UCT(child_node, number_of_branches, node_pool);
+                        neutral_uncontrolled_uct = UCT_Uncontrolled(child_node, number_of_branches);
                     }
                     else
                     {
-                        r64 uct = UCT(child_node, number_of_branches, node_pool);
-                        // TODO(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
-                        if (uct < neutral_uncontrolled_uct)
+                        r64 uct = UCT_Uncontrolled(child_node, number_of_branches);
+                        // NOTE(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
+                        if (uct > neutral_uncontrolled_uct)
                         {
                             neutral_uncontrolled_node = child_node;
                             neutral_uncontrolled_uct = uct;
@@ -799,12 +779,12 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     if (losing_node == nullptr)
                     {
                         losing_node = child_node;
-                        losing_uct = UCT(child_node, number_of_branches, node_pool);
+                        losing_uct = UCT(child_node, number_of_branches);
                     }
                     else
                     {
-                        r64 uct = UCT(child_node, number_of_branches, node_pool);
-                        // NOTE(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
+                        r64 uct = UCT(child_node, number_of_branches);
+                        // NOTE(david): keep the losing move that loses in the most amount of moves or if tied, the one with the highest uct
                         if (uct > losing_uct)
                         {
                             losing_node = child_node;
@@ -838,11 +818,11 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
             if (selected_node == nullptr)
             {
                 selected_node = child_node;
-                selected_uct = UCT(child_node, number_of_branches, node_pool);
+                selected_uct = UCT(child_node, number_of_branches);
             }
             else if (from_node->controlled_type == ControlledType::CONTROLLED)
             {
-                r64 uct = UCT(child_node, number_of_branches, node_pool);
+                r64 uct = UCT(child_node, number_of_branches);
                 if (uct > selected_uct)
                 {
                     selected_node = child_node;
@@ -851,9 +831,9 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
             }
             else if (from_node->controlled_type == ControlledType::UNCONTROLLED)
             {
-                r64 uct = UCT(child_node, number_of_branches, node_pool);
-                // NOTE(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration
-                if (uct < selected_uct)
+                r64 uct = UCT_Uncontrolled(child_node, number_of_branches);
+                // NOTE(david): the uncontrolled node wants a uct that is a mix of low exploitation and high exploration, basically we still want the uncontrolled node to explore in order to find terminal moves, but it also wants nodes that have low mean values (aka exploit part of the uct formula)
+                if (uct > selected_uct)
                 {
                     selected_node = child_node;
                     selected_uct = uct;
@@ -944,7 +924,100 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                 }
                 else
                 {
-                    // NOTE(david): already have a selected move.. if there is a bad move, replace it with a new one
+                    // NOTE(david): already have a selected move.. since we have a limited action space to simulate at a given time, it makes sense to keep the currently selected nodes, however, if there is a bad move, we can replace it with a new one
+                    // NOTE(david): optimally we would also like to explore all the possibilities to a certain depth in order to determine if there are nearby terminal moves, how to do this? One approach that comes to mind is that after certain amounts of simulations, we could prune nodes further, the idea behind this is if that node is not terminal yet (which it isn't at this point) and if the mean value is below a treshold, then we could assume, that the node is not worth exploring further with a high confidence, so prune the node and choose a new move.. we could arrive at a state where we pruned all children, which should already be taken care of. What should the number of simulations be, where we are certain enough that the node can be condition checked to prune? Also what happens, when none of the nodes meet the condition check? Then all the children slots are taken by nodes which are okayish moves.. but we would still not know if there is a terminal moves from the unexplored ones.. so then we would want to prune the worse out of all the promising moves in order to explore further new ones, as there is no benefit in keeping the worst, as we'd just choose the best anyway.
+                    Node *node_to_prune = nullptr;
+                    // TODO(david): similar logic exists in backpropagation, maybe store them in a central place?
+                    // TODO(david): the number of simulations treshold should maybe be a dynamic parameter depending on how much time is allowed to think
+                    u32 min_simulation_confidence_treshold = (u32)(3000.0 / sqrt(from_node->depth + 1)) + 50;
+                    // NOTE(david): two tresholds for controlled/uncontrolled
+                    constexpr r64 min_mean_value_treshold = -0.95;
+                    constexpr r64 max_mean_value_treshold = 0.95;
+
+                    u32 condition_checked_nodes_on_their_simulation_count = 0;
+                    pair<Node *, r64> mean_child_extremum = {};
+
+                    for (u32 child_index = 0; child_index < children_nodes->number_of_children && node_to_prune == nullptr; ++child_index)
+                    {
+                        Node *child_node = children_nodes->children[child_index];
+                        switch (from_node->controlled_type)
+                        {
+                            case ControlledType::CONTROLLED: {
+                                assert(child_node->terminal_info.terminal_type != TerminalType::WINNING && "todo: shoulnd't we have returned with this already?");
+                                if (child_node->terminal_info.terminal_type == TerminalType::LOSING)
+                                {
+                                    node_to_prune = child_node;
+                                }
+                                else if (child_node->num_simulations >= min_simulation_confidence_treshold)
+                                {
+                                    ++condition_checked_nodes_on_their_simulation_count;
+                                    r64 child_mean_value = child_node->value / (r64)child_node->num_simulations;
+                                    if (child_mean_value <= min_mean_value_treshold)
+                                    {
+                                        node_to_prune = child_node;
+                                    }
+                                    else
+                                    {
+                                        // NOTE(david): keep the one with the lowest mean to prune
+                                        if (mean_child_extremum.first == nullptr || child_mean_value < mean_child_extremum.second)
+                                        {
+                                            mean_child_extremum.first = child_node;
+                                            mean_child_extremum.second = child_mean_value;
+                                        }
+                                    }
+                                }
+                            } break ;
+                            case ControlledType::UNCONTROLLED: {
+                                assert(child_node->terminal_info.terminal_type != TerminalType::LOSING && "todo: shoulnd't we have returned with this already?");
+                                if (child_node->terminal_info.terminal_type == TerminalType::WINNING)
+                                {
+                                    node_to_prune = child_node;
+                                }
+                                else if (child_node->num_simulations >= min_simulation_confidence_treshold)
+                                {
+                                    ++condition_checked_nodes_on_their_simulation_count;
+                                    r64 child_mean_value = child_node->value / (r64)child_node->num_simulations;
+                                    if (child_mean_value >= max_mean_value_treshold)
+                                    {
+                                        node_to_prune = child_node;
+                                    }
+                                    else
+                                    {
+                                        // NOTE(david): keep the one with the highest mean to prune
+                                        if (mean_child_extremum.first == nullptr || child_mean_value > mean_child_extremum.second)
+                                        {
+                                            mean_child_extremum.first = child_node;
+                                            mean_child_extremum.second = child_mean_value;
+                                        }
+                                    }
+                                }
+                            } break ;
+                            default: {
+                                UNREACHABLE_CODE;
+                            }
+                        }
+                    }
+                    if (node_to_prune == nullptr)
+                    {
+                        // NOTE(david): none of the moves are terminal and none of them falls outside the mean value with enough simulations
+                        // NOTE(david): if there is only 1 condition checked node that have enough simulations, don't prune it yet, as it's our current best node
+                        if (condition_checked_nodes_on_their_simulation_count != 1)
+                        {
+                            node_to_prune = mean_child_extremum.first;
+                        }
+                    }
+
+                    if (node_to_prune != nullptr)
+                    {
+                        // NOTE(david): if either one of the moves is terminally bad or all the nodes are non-terminal and either we have a node that falls outside of the mean value interval or none of them falls outside, in which case the one with the worst mean is selected
+                        PruneNode(node_to_prune, node_pool);
+                        selected_node = _Expansion(from_node, node_pool);
+                        node_pool.AddChild(from_node, selected_node, selected_move);
+                    }
+                    else
+                    {
+                        // NOTE(david): none of the children are terminally bad and none of them have enough simulations to determine what to prune
+                    }
                 }
             }
             else
@@ -955,6 +1028,14 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
             }
 
             return selected_node;
+        }
+        else
+        {
+            // NOTE(david): none of the legal moves serialized are higher than the current highest serialized move stored in the child_table -> we don't have a new move
+            if (from_node->parent == nullptr)
+            {
+                LOG(cout, "all moves are exhausted for root node");
+            }
         }
     }
 
@@ -1092,8 +1173,10 @@ Node *MCST::_Expansion(Node *from_node, NodePool &node_pool)
     return result;
 }
 
-static void _updateTerminalDepthForParentNode(Node *cur_node, Node *parent_node)
+static void _updateTerminalDepthForParentNode(Node *cur_node)
 {
+    Node *parent_node = cur_node->parent;
+    assert(parent_node != nullptr);
     if (parent_node->terminal_info.terminal_depth.winning == 0)
     {
         parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
@@ -1121,22 +1204,6 @@ static void _updateTerminalDepthForParentNode(Node *cur_node, Node *parent_node)
     }
 }
 
-inline void UpdateVariance(Node *node, r64 value)
-{
-    r64 mean = node->value / (r64)node->num_simulations;
-    r64 delta = value - mean;
-    node->variance += delta * (value - mean);
-    assert(node->num_simulations > 0);
-    if (node->num_simulations == 1)
-    {
-        node->variance = 0.0;
-    }
-    else
-    {
-        node->variance /= (r64)(node->num_simulations - 1);
-    }
-}
-
 void MCST::PruneNode(Node *node_to_prune, NodePool &node_pool)
 {
     assert(node_to_prune != _root_node && "TODO: what does it mean to prune the root node?");
@@ -1145,13 +1212,9 @@ void MCST::PruneNode(Node *node_to_prune, NodePool &node_pool)
     // NOTE(david): backpropagate the fact that the node is pruned -> update variance and other values of the parent nodes
     // NOTE(david): the selection algorithm knows that this move shouldn't be picked anymore, as the moves are selected sequentially by their order of serialization
     r64 from_node_mean = node_to_prune->value / (r64)node_to_prune->num_simulations;
-    Node *cur_node = node_pool.GetParent(node_to_prune);
+    Node *cur_node = node_to_prune->parent;
     while (cur_node != nullptr)
     {
-        r64 mean = cur_node->value / (r64)cur_node->num_simulations;
-        r64 delta = from_node_mean - mean;
-        cur_node->variance = cur_node->variance - node_to_prune->variance - delta * delta * (r64)node_to_prune->num_simulations * (r64)cur_node->num_simulations / ((r64)node_to_prune->num_simulations + (r64)cur_node->num_simulations);
-
         cur_node->value -= node_to_prune->value;
         assert(cur_node->num_simulations >= node_to_prune->num_simulations);
         cur_node->num_simulations -= node_to_prune->num_simulations;
@@ -1163,7 +1226,7 @@ void MCST::PruneNode(Node *node_to_prune, NodePool &node_pool)
             assert(false && "this shouldn't be possible, as the node's children's total number of simulation should be less than the parent's, as there is at least 1 unique simulation from the parent");
         }
 
-        cur_node = node_pool.GetParent(cur_node);
+        cur_node = cur_node->parent;
     }
 
     // NOTE(david): after done updating the parents, free the node and its children
@@ -1177,19 +1240,16 @@ void MCST::_BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult
 
     assert(from_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL || from_node->num_simulations == 1 && "TODO: current implementation: simulate once, I need to reintroduce this number to the simulation result maybe");
 
-    // TODO(david): maybe update this value after the simulation as the other values are updated there as well
-    UpdateVariance(from_node, simulation_result.value);
-
     /*
         NOTE(david): don't backpropagate if the node needs to be pruned
         Criterias under which the node needs to be pruned:
-            - with high certainty (narrow confidence interval) the value is below a certain threshold
+            // NOTE(david): implemented this, but didn't find it to be necessary, the mean value is enough? - with high certainty (narrow confidence interval) the value is below a certain threshold
             // TODO(david): - understand and maybe implement this: if the confidence interval doesn't overlap with the parent's confidence interval (? because the outcome of the node isn't very different therefore it's not worth exploring further)
     */
 
     if (from_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
     {
-        Node *parent_node = node_pool.GetParent(from_node);
+        Node *parent_node = from_node->parent;
         assert(parent_node != nullptr && "node can't be root to propagate back from, as if it was terminal we should have already returned an evaluation result");
 
         switch (from_node->terminal_info.terminal_type)
@@ -1210,46 +1270,37 @@ void MCST::_BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult
         {
             parent_node->terminal_info.terminal_type = from_node->terminal_info.terminal_type;
         }
-        _updateTerminalDepthForParentNode(from_node, parent_node);
+        _updateTerminalDepthForParentNode(from_node);
     }
 
-    Node *cur_node = node_pool.GetParent(from_node);
+    Node *cur_node = from_node->parent;
     while (cur_node != nullptr)
     {
-        Node *parent_node = node_pool.GetParent(cur_node);
+        Node *parent_node = cur_node->parent;
 
         // TODO(david): add backpropagating rules terminal rules here?
         if (parent_node)
         {
-            _updateTerminalDepthForParentNode(cur_node, parent_node);
+            _updateTerminalDepthForParentNode(cur_node);
         }
 
         cur_node->num_simulations += from_node->num_simulations;
         cur_node->value += from_node->value;
 
-        UpdateVariance(cur_node, simulation_result.value);
-
         if (cur_node != _root_node)
         {
-            // TODO(david): is this the right place to prune the node based on its confidence interval?
+            // TODO(david): is this the right place to prune the node based on its mean value
             // NOTE(david): once the node is eligible for pruning, derail this subroutine to pruning instead of updating
-            pair<r64, r64> confidence_interval = ConfidenceInterval(cur_node);
 
-            constexpr r64 confidence_interval_width_treshold = 0.01;
-            r64 confidence_interval_width = confidence_interval.second - confidence_interval.first;
-            if (confidence_interval_width < 0.0)
+            assert(cur_node->depth > 0);
+            // TODO(david): the number of simulations treshold should maybe be a dynamic parameter depending on how much time is allowed to think
+            u32 number_of_simulations_treshold = (u32)(3000.0 / sqrt(cur_node->depth)) + 50;
+            if (cur_node->num_simulations >= number_of_simulations_treshold)
             {
-                LOG(cerr, "confidence_interval_width: " << confidence_interval_width);
-                assert(confidence_interval_width >= 0.0);
-            }
-
-            u32 number_of_simulations_treshold = 200 / cur_node->depth + 25;
-            if (cur_node->num_simulations >= number_of_simulations_treshold && confidence_interval_width <= confidence_interval_width_treshold)
-            {
-                constexpr r64 mean_prune_treshold = -0.25;
-                constexpr r64 mean_terminal_win_treshold = 0.5;
+                constexpr r64 lower_mean_prune_treshold = -0.95;
+                constexpr r64 upper_mean_prune_treshold = 0.95;
                 r64 mean = cur_node->value / (r64)cur_node->num_simulations;
-                if (mean <= mean_prune_treshold)
+                if (mean <= lower_mean_prune_treshold)
                 {
                     if (cur_node->controlled_type == ControlledType::CONTROLLED)
                     {
@@ -1259,7 +1310,7 @@ void MCST::_BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult
                         if (parent_node)
                         {
                             parent_node->terminal_info.terminal_type = cur_node->terminal_info.terminal_type;
-                            _updateTerminalDepthForParentNode(cur_node, parent_node);
+                            _updateTerminalDepthForParentNode(cur_node);
                         }
                     }
                     else
@@ -1271,7 +1322,7 @@ void MCST::_BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult
                         return ;
                     }
                 }
-                else if (mean >= mean_terminal_win_treshold)
+                else if (mean >= upper_mean_prune_treshold)
                 {
                     if (cur_node->controlled_type == ControlledType::UNCONTROLLED)
                     {
@@ -1281,7 +1332,7 @@ void MCST::_BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult
                         if (parent_node)
                         {
                             parent_node->terminal_info.terminal_type = cur_node->terminal_info.terminal_type;
-                            _updateTerminalDepthForParentNode(cur_node, parent_node);                        
+                            _updateTerminalDepthForParentNode(cur_node);                        
                         }
                     }
                     else

@@ -54,15 +54,13 @@ typedef i32 NodeIndex;
 struct Node
 {
     r32 value;
-    // NOTE(david): need these to update variance
-    r32 variance;
-
     u32 num_simulations;
 
     // NOTE(david): unique index to the child table as well as for the node
+    // TODO(david): maybe store the actual pointer to the children table for the same reasons as to store the parent pointer instead of the index of the parent
     NodeIndex index;
-    // TODO(david): maybe it makes sense to store the parent as a pointer to give up some extra space in order to avoid the extra lookup through NodePool
-    NodeIndex parent;
+    // NOTE(david): maybe it makes sense to store the parent as a pointer to give up some extra space in order to avoid the extra lookup through NodePool
+    Node *parent;
 
     ControlledType controlled_type;
     TerminalInfo terminal_info;
@@ -113,7 +111,6 @@ public:
 
     void AddChild(Node *node, Node *child, Move move);
     ChildrenTables *GetChildren(Node *node);
-    Node *GetParent(Node *node) const;
 
     void Clear();
     void ClearChildTable(u32 table_index);

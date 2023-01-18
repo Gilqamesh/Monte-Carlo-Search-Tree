@@ -7,6 +7,7 @@
 #include <functional>
 #include "types.hpp"
 #include "raylib.h"
+#include <vector>
 
 using namespace std;
 
@@ -78,7 +79,7 @@ enum class Player
 constexpr u32 GRID_DIM_ROW = 5;
 constexpr u32 GRID_DIM_COL = 5;
 constexpr u32 ConnectToWinCount = 4;
-constexpr std::chrono::milliseconds max_evaluation_time = 120000ms;
+constexpr std::chrono::milliseconds max_evaluation_time = 20000ms;
 
 struct Move
 {
@@ -774,17 +775,18 @@ static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_po
 
 static void RenderGameState(GameState *game_state, GameWindow *game_window)
 {
+    constexpr r32 grid_line_thickness = 3.5f;
     for (u32 row = 0; row < GRID_DIM_ROW - 1; ++row)
     {
         Vector2 horizontal_start = { 0.0f, (r32)game_window->height * (row + 1) / (r32)GRID_DIM_ROW };
         Vector2 horizontal_end = { (r32)game_window->width, (r32)game_window->height * (row + 1) / (r32)GRID_DIM_ROW };
-        DrawLineEx(horizontal_start, horizontal_end, 5.0f, BLACK);
+        DrawLineEx(horizontal_start, horizontal_end, grid_line_thickness, BLACK);
     }
     for (u32 col = 0; col < GRID_DIM_COL - 1; ++col)
     {
         Vector2 vertical_start = { (r32)game_window->width * (col + 1) / (r32)GRID_DIM_COL, 0.0f };
         Vector2 vertical_end = { (r32)game_window->width * (col + 1) / (r32)GRID_DIM_COL, (r32)game_window->height };
-        DrawLineEx(vertical_start, vertical_end, 5.0f, BLACK);
+        DrawLineEx(vertical_start, vertical_end, grid_line_thickness, BLACK);
     }
 
     for (u32 row = 0; row < GRID_DIM_ROW; ++row)
@@ -794,19 +796,23 @@ static void RenderGameState(GameState *game_state, GameWindow *game_window)
             Move move = { row, col };
             Vector2 grid_offset = { (r32)game_window->width / (r32)GRID_DIM_COL * (r32)col, (r32)game_window->height / (r32)GRID_DIM_ROW * (r32)row };
             Vector2 grid_size   = { (r32)game_window->width / (r32)GRID_DIM_COL, (r32)game_window->height / (r32)GRID_DIM_ROW };
+            constexpr r32 size_ratio = 0.8f;
             switch (game_state->move_to_player_map.GetPlayer(move))
             {
                 case Player::CIRCLE: {
-                    DrawEllipseLines(grid_size.x / 2.0f + grid_offset.x, grid_size.y / 2.0f + grid_offset.y, grid_size.x / 2.0f, grid_size.y / 2.0f, RED);
+                    DrawEllipseLines(grid_size.x / 2.0f + grid_offset.x, grid_size.y / 2.0f + grid_offset.y, size_ratio * grid_size.x / 2.0f, size_ratio * grid_size.y / 2.0f, RED);
                 } break ;
                 case Player::CROSS: {
-                    Vector2 cross_start1 = grid_offset;
-                    Vector2 cross_end1   = { grid_offset.x + grid_size.x, grid_offset.y + grid_size.y };
-                    DrawLineEx(cross_start1, cross_end1, 3.0f, BLUE);
+                    constexpr r32 inner_offset_ratio = 0.9f;
+                    constexpr r32 cross_line_thickness = 3.0f;
+                    Vector2 inner_offset = { inner_offset_ratio * grid_size.x, inner_offset_ratio * grid_size.y };
+                    Vector2 cross_start1 = { grid_offset.x + inner_offset.x, grid_offset.y + inner_offset.y };
+                    Vector2 cross_end1   = { grid_offset.x + grid_size.x - inner_offset.x, grid_offset.y + grid_size.y - inner_offset.y };
+                    DrawLineEx(cross_start1, cross_end1, cross_line_thickness, BLUE);
 
-                    Vector2 cross_start2 = { grid_offset.x, grid_offset.y + grid_size.y };
-                    Vector2 cross_end2   = { grid_offset.x + grid_size.x, grid_offset.y };
-                    DrawLineEx(cross_start2, cross_end2, 3.0f, BLUE);
+                    Vector2 cross_start2 = { grid_offset.x + inner_offset.x, grid_offset.y + grid_size.y - inner_offset.y };
+                    Vector2 cross_end2   = { grid_offset.x + grid_size.x - inner_offset.x, grid_offset.y + inner_offset.y };
+                    DrawLineEx(cross_start2, cross_end2, cross_line_thickness, BLUE);
                 } break ;
             }
         }

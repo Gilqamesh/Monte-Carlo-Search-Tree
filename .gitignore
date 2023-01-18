@@ -1,2 +1,3 @@
 build/*
 debug/*
+# TODO: ignore everything, and keep a list of files that needs to be pushed
