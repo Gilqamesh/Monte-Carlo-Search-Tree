@@ -11,15 +11,19 @@
 using namespace std;
 
 #if 1
-#define DEBUG_TIME
+# define DEBUG_TIME
+#endif
+
+#if 1
+# define DEBUG_WRITE_OUT
 #endif
 
 #if 0
-#define DEBUG_WRITE_OUT
+# define DEBUG_WRITE_OUT_SIM_RESULT
 #endif
 
 #if 0
-#define DEBUG_PRINT
+# define DEBUG_PRINT
 #endif
 
 #define ArrayCount(array) (sizeof(array) / sizeof((array)[0]))
@@ -74,14 +78,16 @@ enum class Player
 constexpr u32 GRID_DIM_ROW = 5;
 constexpr u32 GRID_DIM_COL = 5;
 constexpr u32 ConnectToWinCount = 4;
+constexpr std::chrono::milliseconds max_evaluation_time = 120000ms;
 
 struct Move
 {
     u32 row;
     u32 col;
 
-    bool IsValid(void);
+    bool IsValid(void) const;
     void Invalidate(void);
+    u32 Serialize(void) const;
 };
 
 bool operator==(const Move &a, const Move &b)
@@ -94,7 +100,19 @@ bool operator!=(const Move &a, const Move &b)
     return (a.row != b.row || a.col != b.col);
 }
 
-bool Move::IsValid(void)
+bool operator<(const Move &a, const Move &b)
+{
+    return a.Serialize() < b.Serialize();
+}
+
+u32 Move::Serialize(void) const
+{
+    u32 index = row * GRID_DIM_COL + col;
+
+    return index;
+}
+
+bool Move::IsValid(void) const
 {
     return !(row == 10000 && col == 10000); 
 }
@@ -126,21 +144,22 @@ struct MoveToPlayerMap
 
 Player MoveToPlayerMap::GetPlayer(u32 row, u32 col) const
 {
-    u32 map_index = row * GRID_DIM_COL + col;
+    Move move = { row, col };
+    u32 map_index = move.Serialize();
     assert(map_index < ArrayCount(MoveToPlayerMap::map));
     return map[map_index];
 }
 
 Player MoveToPlayerMap::GetPlayer(Move move) const
 {
-    u32 map_index = move.row * GRID_DIM_COL + move.col;
+    u32 map_index = move.Serialize();
     assert(map_index < ArrayCount(MoveToPlayerMap::map));
     return map[map_index];
 }
 
 void MoveToPlayerMap::AddPlayer(Move move, Player player)
 {
-    u32 map_index = move.row * GRID_DIM_COL + move.col;
+    u32 map_index = move.Serialize();
     assert(map_index < ArrayCount(MoveToPlayerMap::map));
     map[map_index] = player;
 }
@@ -151,7 +170,8 @@ void MoveToPlayerMap::Clear(void)
     {
         for (u32 col = 0; col < GRID_DIM_COL; ++col)
         {
-            u32 map_index = row * GRID_DIM_COL + col;
+            Move move = { row, col };
+            u32 map_index = move.Serialize();
             map[map_index] = Player::NONE;
         }
     }
@@ -186,7 +206,7 @@ void MoveSet::DeleteMove(Move move)
 
 void MoveSet::AddMove(Move move)
 {
-    u32 move_index = move.row * GRID_DIM_COL + move.col;
+    u32 move_index = move.Serialize();
     assert(move_index < ArrayCount(MoveSet::moves));
     moves[move_index] = move;
     ++moves_left;
@@ -408,12 +428,13 @@ GameOutcome DetermineGameOutcome(GameState &game_state, Player player_to_win)
 bool g_should_write_out_simulation;
 ofstream g_simresult_fs;
 
-void simulation_from_position_once(const MoveSequence &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
+SimulationResult simulation_from_position_once(const MoveSequence &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
 {
     GameState cur_game_state = game_state;
     Player player_that_needs_to_win = cur_game_state.player_to_move;
+    SimulationResult simulation_result = {};
 
-#if defined(DEBUG_WRITE_OUT)
+#if defined(DEBUG_WRITE_OUT_SIM_RESULT)
     if (g_should_write_out_simulation)
     {
         LOG(g_simresult_fs, "Player about to move: " << PlayerToWord(cur_game_state.player_to_move));
@@ -479,7 +500,7 @@ void simulation_from_position_once(const MoveSequence &movesequence_from_positio
         // NOTE(david): maybe there is no winning/losing terminal type, only values
         case GameOutcome::WIN:
         {
-            node->value += player_that_needs_to_win == last_player_to_move ? 1.0 : -1.0;
+            simulation_result.value = player_that_needs_to_win == last_player_to_move ? 1.0 : -1.0;
             if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
             {
                 node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::WINNING : TerminalType::LOSING;
@@ -488,7 +509,7 @@ void simulation_from_position_once(const MoveSequence &movesequence_from_positio
         break;
         case GameOutcome::LOSS:
         {
-            node->value += player_that_needs_to_win == last_player_to_move ? -1.0 : 1.0;
+            simulation_result.value = player_that_needs_to_win == last_player_to_move ? -1.0 : 1.0;
             if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
             {
                 node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::LOSING : TerminalType::WINNING;
@@ -497,7 +518,7 @@ void simulation_from_position_once(const MoveSequence &movesequence_from_positio
         break;
         case GameOutcome::DRAW:
         {
-            node->value += 0.0;
+            simulation_result.value = 0.0;
             if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
             {
                 node->terminal_info.terminal_type = TerminalType::NEUTRAL;
@@ -509,8 +530,10 @@ void simulation_from_position_once(const MoveSequence &movesequence_from_positio
             UNREACHABLE_CODE;
         }
     }
+    node->value += simulation_result.value;
+    ++node->num_simulations;
 
-#if defined(DEBUG_WRITE_OUT)
+#if defined(DEBUG_WRITE_OUT_SIM_RESULT)
     if (g_should_write_out_simulation)
     {
         LOG(g_simresult_fs, "Player to move: " << PlayerToWord(cur_game_state.player_to_move));
@@ -527,16 +550,18 @@ void simulation_from_position_once(const MoveSequence &movesequence_from_positio
         assert(movesequence_index == movesequence_from_position.number_of_moves && "still have moves to apply to the position from movesequence so the simulation can't end before that");
     }
 
-    ++node->num_simulations;
+    return simulation_result;
 }
 
-void simulation_from_position(const MoveSequence &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
+SimulationResult simulation_from_position(const MoveSequence &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
 {
+    SimulationResult simulation_result = {};
+
     assert(movesequence_from_position.number_of_moves > 0 && "must have at least one move to apply to the position");
 
     g_should_write_out_simulation = true;
 
-#if defined(DEBUG_WRITE_OUT)
+#if defined(DEBUG_WRITE_OUT_SIM_RESULT)
     static u32 sim_counter = 0;
     g_simresult_fs = ofstream("debug/sim_results/sim_result" + to_string(sim_counter++));
 #endif
@@ -553,9 +578,10 @@ void simulation_from_position(const MoveSequence &movesequence_from_position, co
          current_simulation_count < number_of_simulations;
          ++current_simulation_count)
     {
-        simulation_from_position_once(movesequence_from_position, game_state, node, node_pool);
+        assert(number_of_simulations == 1 && "if there are multiple simulations, we need to add this fact to the simulation_result, as the calculation of the variance would be different");
+        simulation_result = simulation_from_position_once(movesequence_from_position, game_state, node, node_pool);
 
-#if defined(DEBUG_WRITE_OUT)
+#if defined(DEBUG_WRITE_OUT_SIM_RESULT)
         LOGN(g_simresult_fs, node->value << " ");
         g_should_write_out_simulation = false;
 #endif
@@ -573,9 +599,11 @@ void simulation_from_position(const MoveSequence &movesequence_from_position, co
         }
     }
 
-#if defined(DEBUG_WRITE_OUT)
+#if defined(DEBUG_WRITE_OUT_SIM_RESULT)
     LOG(g_simresult_fs, "");
 #endif
+
+    return simulation_result;
 }
 
 static void InitializeGameState(GameState *game_state)
@@ -689,7 +717,6 @@ static void UpdateMove(GameState *game_state, Move move)
 
 static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_pool, GameWindow *game_window)
 {
-    constexpr std::chrono::milliseconds max_evaluation_time = 20000ms;
     if (game_state->outcome_for_previous_player == GameOutcome::NONE)
     {
         if (game_state->player_to_move == Player::CROSS)
@@ -710,6 +737,8 @@ static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_po
             {
                 g_evaluate_thread.join();
                 g_evaluate_thread_is_working = false;
+                LOG(cout, "Currently allocated nodes: " << node_pool->CurrentAllocatedNodes());
+                LOG(cout, "Total freed nodes: " << node_pool->TotalNumberOfFreedNodes());
                 if (g_selected_move.IsValid())
                 {
                     g_finished_evaluation = false;
@@ -791,7 +820,7 @@ i32 main()
 
     SetTargetFPS(60);
 
-    constexpr NodeIndex node_pool_size = 1048576;
+    constexpr NodeIndex node_pool_size = 2097152;
     NodePool node_pool(node_pool_size);
     MCST mcst;
 

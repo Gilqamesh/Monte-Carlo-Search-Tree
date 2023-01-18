@@ -54,8 +54,12 @@ typedef i32 NodeIndex;
 struct Node
 {
     r32 value;
+    // NOTE(david): need these to update variance
+    r32 variance;
+
     u32 num_simulations;
 
+    // NOTE(david): unique index to the child table as well as for the node
     NodeIndex index;
     // TODO(david): maybe it makes sense to store the parent as a pointer to give up some extra space in order to avoid the extra lookup through NodePool
     NodeIndex parent;
@@ -68,6 +72,12 @@ struct Node
     u16 depth;
 };
 
+struct SimulationResult
+{
+    r32 value;
+};
+
+// TODO(david): reallocation of more nodes if the nodepool is full?
 struct NodePool
 {
     const NodeIndex _number_of_nodes_allocated;
@@ -80,15 +90,20 @@ struct NodePool
 
     // NOTE(david): shouldn't be more than the max action space at any point
     // TODO(david): should also be dynamic, as depending on the state, the action space is vastly different in size
-    static constexpr u32 allowed_branching_factor = 30;
+    // TODO(david): actually this could be limited in size, and with pruning existing nodes (based on some upper confidence bound) can be updated with new ones
+    // NOTE(david): the children nodes are stored randomly
+    static constexpr u32 allowed_branching_factor = 3;
     struct ChildrenTables
     {
         Node *children[allowed_branching_factor];
         u32 number_of_children;
+        i32 highest_serialized_move;
     };
 
     ChildrenTables *_move_to_node_tables;
 
+    // TODO(david): count the number of allocated and freed nodes
+    u32 _total_number_of_freed_nodes;
 public:
     NodePool(NodeIndex number_of_nodes_to_allocate);
     ~NodePool();
@@ -101,9 +116,15 @@ public:
     Node *GetParent(Node *node) const;
 
     void Clear();
+    void ClearChildTable(u32 table_index);
+
+    u32 TotalNumberOfFreedNodes(void);
+    u32 CurrentAllocatedNodes(void);
+private:
+    void FreeNodeHelper(Node *node);
 };
 
-using SimulateFromState = function<void(const MoveSequence &move_chain_from_world_state, const GameState &game_state, Node *node, const NodePool &node_pool)>;
+using SimulateFromState = function<SimulationResult(const MoveSequence &move_chain_from_world_state, const GameState &game_state, Node *node, const NodePool &node_pool)>;
 using TerminationPredicate = function<bool(bool found_perfect_move)>;
 
 class MCST
@@ -130,7 +151,8 @@ private:
     SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, NodePool &node_pool);
     Node *_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, bool focus_on_lowest_utc_to_prune, NodePool &node_pool);
     Node *_Expansion(Node *from_node, NodePool &node_pool);
-    void _BackPropagate(Node *from_node, NodePool &node_pool);
+    void _BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult simulation_result);
+    void PruneNode(Node *from_node, NodePool &node_pool);
 
     using WinningMoveSelectionStrategy = function<Move(Node *from_node, NodePool &node_pool)>;
     WinningMoveSelectionStrategy winning_move_selection_strategy_fn;
