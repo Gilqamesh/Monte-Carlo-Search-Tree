@@ -120,9 +120,13 @@ void MoveSequence::AddMove(Move move)
     moves[number_of_moves++] = move;
 }
 
+NodePool *debug_node_pool;
 ostream &operator<<(ostream &os, Node *node)
 {
-    LOGN(os, "index: " << node->index << ", " << MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", sims: " << node->num_simulations << ", " << ControlledTypeToWord(node->controlled_type)) << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", terminal depth(W/L/N): (" << node->terminal_info.terminal_depth.winning << "," << node->terminal_info.terminal_depth.losing << "," << node->terminal_info.terminal_depth.neutral << "), uct: " << (node->parent == nullptr ? 0.0 : (node->controlled_type == ControlledType::UNCONTROLLED ? UCT(node, 0) : UCT_Uncontrolled(node, 0)));
+    NodePool::ChildrenTables *children_table = debug_node_pool->GetChildren(node);
+    Move highest_move_cycled = Deserialize(children_table->highest_serialized_move);
+    Move highest_possible_move = { GRID_DIM_ROW - 1, GRID_DIM_COL - 1 };
+    LOGN(os, "index: " << node->index << ", " << MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", sims: " << node->num_simulations << ", " << ControlledTypeToWord(node->controlled_type) << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", terminal depth(W/L/N): (" << node->terminal_info.terminal_depth.winning << "," << node->terminal_info.terminal_depth.losing << "," << node->terminal_info.terminal_depth.neutral << "), uct: " << (node->parent == nullptr ? 0.0 : (node->controlled_type == ControlledType::UNCONTROLLED ? UCT(node, 0) : UCT_Uncontrolled(node, 0))) << ", highest move cycled: " << (highest_move_cycled == highest_possible_move ? "all moves are cycled" : MoveToWord(highest_move_cycled)));
 
     return os;
 }
@@ -543,11 +547,12 @@ static void DebugPrintDecisionTree(Node *from_node, u32 move_counter, NodePool &
 
 static u32 g_move_counter;
 
-static GameState debug_game_state;
+const GameState *debug_game_state;
 
 Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredicate termination_predicate, SimulateFromState simulation_from_state, NodePool &node_pool, const GameState &game_state)
 {
-    debug_game_state = game_state;
+    debug_game_state = &game_state;
+    debug_node_pool = &node_pool;
 
     if (legal_moveset_at_root_node.moves_left == 0)
     {
@@ -628,10 +633,11 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
 
         ++EvaluateIterations;
     }
-    LOG(cout, "Evaluate iterations: " << EvaluateIterations << ", total: " << selection_cycles_total + backpropagate_cycles_total + simulation_cycles_total << "M");
-    LOG(cout, "Selection total cycles: " << selection_cycles_total << "M");
-    LOG(cout, "Backpropagate total cycles: " << backpropagate_cycles_total << "M");
-    LOG(cout, "Simulation total cycles: " << simulation_cycles_total << "M");
+    u32 total_clock_cycles_m = selection_cycles_total + backpropagate_cycles_total + simulation_cycles_total;
+    LOG(cout, "Evaluate iterations: " << EvaluateIterations << ", total: " << total_clock_cycles_m << "M");
+    LOG(cout, "Selection total cycles: " << selection_cycles_total << "M, " << (r64)selection_cycles_total / (r64)total_clock_cycles_m * 100.0 << "%");
+    LOG(cout, "Backpropagate total cycles: " << backpropagate_cycles_total << "M, " << (r64)backpropagate_cycles_total / (r64)total_clock_cycles_m * 100.0 << "%");
+    LOG(cout, "Simulation total cycles: " << simulation_cycles_total << "M, " << (r64)simulation_cycles_total / (r64)total_clock_cycles_m * 100.0 << "%");
 
 #if defined(DEBUG_WRITE_OUT)
     DebugPrintDecisionTree(_root_node, g_move_counter, node_pool, game_state);
@@ -929,7 +935,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     Node *node_to_prune = nullptr;
                     // TODO(david): similar logic exists in backpropagation, maybe store them in a central place?
                     // TODO(david): the number of simulations treshold should maybe be a dynamic parameter depending on how much time is allowed to think
-                    u32 min_simulation_confidence_treshold = (u32)(3000.0 / sqrt(from_node->depth + 1)) + 50;
+                    u32 min_simulation_confidence_cycle_treshold = (u32)(500.0 / sqrt(from_node->depth + 1)) + 50;
                     // NOTE(david): two tresholds for controlled/uncontrolled
                     constexpr r64 min_mean_value_treshold = -0.95;
                     constexpr r64 max_mean_value_treshold = 0.95;
@@ -948,7 +954,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                                 {
                                     node_to_prune = child_node;
                                 }
-                                else if (child_node->num_simulations >= min_simulation_confidence_treshold)
+                                else if (child_node->num_simulations >= min_simulation_confidence_cycle_treshold)
                                 {
                                     ++condition_checked_nodes_on_their_simulation_count;
                                     r64 child_mean_value = child_node->value / (r64)child_node->num_simulations;
@@ -973,7 +979,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                                 {
                                     node_to_prune = child_node;
                                 }
-                                else if (child_node->num_simulations >= min_simulation_confidence_treshold)
+                                else if (child_node->num_simulations >= min_simulation_confidence_cycle_treshold)
                                 {
                                     ++condition_checked_nodes_on_their_simulation_count;
                                     r64 child_mean_value = child_node->value / (r64)child_node->num_simulations;
@@ -1034,7 +1040,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
             // NOTE(david): none of the legal moves serialized are higher than the current highest serialized move stored in the child_table -> we don't have a new move
             if (from_node->parent == nullptr)
             {
-                LOG(cout, "all moves are exhausted for root node");
+                // LOG(cout, "all moves are exhausted for root node");
             }
         }
     }
@@ -1164,7 +1170,7 @@ Node *MCST::_Expansion(Node *from_node, NodePool &node_pool)
     Node *result = node_pool.AllocateNode(from_node);
     if (!(from_node->controlled_type == ControlledType::CONTROLLED || from_node->controlled_type == ControlledType::UNCONTROLLED))
     {
-        DebugPrintDecisionTree(_root_node, g_move_counter, node_pool, debug_game_state);
+        DebugPrintDecisionTree(_root_node, g_move_counter, node_pool, *debug_game_state);
         LOG(cerr, "from_node: " << from_node);
         assert((from_node->controlled_type == ControlledType::CONTROLLED || from_node->controlled_type == ControlledType::UNCONTROLLED) && "from_node's controlled type is not initialized");
     }
@@ -1220,7 +1226,7 @@ void MCST::PruneNode(Node *node_to_prune, NodePool &node_pool)
         cur_node->num_simulations -= node_to_prune->num_simulations;
         if (cur_node->num_simulations == 0)
         {
-            DebugPrintDecisionTree(_root_node, g_move_counter, node_pool, debug_game_state);
+            DebugPrintDecisionTree(_root_node, g_move_counter, node_pool, *debug_game_state);
             LOG(cerr, "node_to_prune: " << node_to_prune);
             LOG(cerr, "cur_node: " << cur_node);
             assert(false && "this shouldn't be possible, as the node's children's total number of simulation should be less than the parent's, as there is at least 1 unique simulation from the parent");

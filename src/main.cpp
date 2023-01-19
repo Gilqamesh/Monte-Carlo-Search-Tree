@@ -38,7 +38,6 @@ using namespace std;
 static std::chrono::time_point<std::chrono::high_resolution_clock> g_start_clock;
 static std::chrono::time_point<std::chrono::high_resolution_clock> g_end_clock;
 static double g_clock_cycles_var;
-
 #if defined (DEBUG_TIME)
 # define TIMED_BLOCK(job_name, job_expression) \
     g_start_clock = std::chrono::high_resolution_clock::now(); \
@@ -90,6 +89,22 @@ struct Move
     void Invalidate(void);
     u32 Serialize(void) const;
 };
+
+Move Deserialize(u32 serialized_move)
+{
+    Move result = {};
+
+    if (serialized_move > GRID_DIM_ROW * GRID_DIM_COL)
+    {
+        result.Invalidate();
+        return result;
+    }
+    
+    result.row = serialized_move / GRID_DIM_COL;
+    result.col = serialized_move - result.row * GRID_DIM_COL;
+
+    return result;
+}
 
 bool operator==(const Move &a, const Move &b)
 {

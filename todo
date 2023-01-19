@@ -2,5 +2,5 @@ tuning parameters with ML techniques
 more data oriented design (access patterns, memory layout, alignment)
 api stuff
 write down thought process behind the implementation
-persisting a transposition table (caching processed terminal nodes) throughout multiple moves might be worth it?
+persisting a transposition table (caching processed terminal nodes) throughout multiple moves might be worth it? also for move cycling, we could introduce re-cycling of moves to explore the entire action space quickly without dropping all previous processing)
 optimization (parallelization, vectorization, best conceivable runtime/number of ops)
