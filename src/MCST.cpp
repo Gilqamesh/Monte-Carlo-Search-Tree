@@ -563,20 +563,10 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
     node_pool.Clear();
     _root_node = node_pool.AllocateNode(nullptr);
     _root_node->controlled_type = ControlledType::CONTROLLED;
-    
-    u32 EvaluateIterations = 0;
-    double selection_cycles_total = 0;
-    u32 selection_cycles_count = 0;
-    double simulation_cycles_total = 0;
-    u32 simulation_cycles_count = 0;
-    double backpropagate_cycles_total = 0;
-    u32 backpropagate_cycles_count = 0;
+
     while (termination_predicate(false) == false)
     {
-        TIMED_BLOCK("_Selection", SelectionResult selection_result = _Selection(legal_moveset_at_root_node, node_pool));
-        // SelectionResult selection_result = _Selection(legal_moveset_at_root_node, move_processor, node_pool);
-        selection_cycles_total += g_clock_cycles_var;
-        ++selection_cycles_count;
+        TIMED_BLOCK(SelectionResult selection_result = _Selection(legal_moveset_at_root_node, node_pool), JobNames::Selection);
 
         SimulationResult simulation_result = {};
         if (selection_result.selected_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
@@ -614,11 +604,7 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
         }
         else
         {
-            TIMED_BLOCK("simulation_from_state", simulation_result = simulation_from_state(selection_result.movesequence_from_position, game_state, selection_result.selected_node, node_pool));
-            // simulation_from_state(selection_result.movesequence_from_position, selection_result.selected_node, node_pool);
-            simulation_cycles_total += g_clock_cycles_var;
-            ++simulation_cycles_count;
-
+            TIMED_BLOCK(simulation_result = simulation_from_state(selection_result.movesequence_from_position, game_state, selection_result.selected_node, node_pool), JobNames::Simulation);
         }
 //         if (selection_result.selected_node->num_simulations > 10000000)
 //         {
@@ -627,17 +613,8 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
 // #endif
 //             assert(false && "suspicious amount of simulations, make sure this could happen");
 //         }
-        TIMED_BLOCK("_BackPropagate", _BackPropagate(selection_result.selected_node, node_pool, simulation_result));
-        backpropagate_cycles_total += g_clock_cycles_var;
-        ++backpropagate_cycles_count;
-
-        ++EvaluateIterations;
+        TIMED_BLOCK(_BackPropagate(selection_result.selected_node, node_pool, simulation_result), JobNames::BackPropagate);
     }
-    u32 total_clock_cycles_m = selection_cycles_total + backpropagate_cycles_total + simulation_cycles_total;
-    LOG(cout, "Evaluate iterations: " << EvaluateIterations << ", total: " << total_clock_cycles_m << "M");
-    LOG(cout, "Selection total cycles: " << selection_cycles_total << "M, " << (r64)selection_cycles_total / (r64)total_clock_cycles_m * 100.0 << "%");
-    LOG(cout, "Backpropagate total cycles: " << backpropagate_cycles_total << "M, " << (r64)backpropagate_cycles_total / (r64)total_clock_cycles_m * 100.0 << "%");
-    LOG(cout, "Simulation total cycles: " << simulation_cycles_total << "M, " << (r64)simulation_cycles_total / (r64)total_clock_cycles_m * 100.0 << "%");
 
 #if defined(DEBUG_WRITE_OUT)
     DebugPrintDecisionTree(_root_node, g_move_counter, node_pool, game_state);

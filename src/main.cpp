@@ -1,13 +1,15 @@
 #include <thread>
 #include <cstdlib>
 #include <iostream>
+#include <iomanip>
 #include <random>
 #include <stdexcept>
 #include <cassert>
 #include <functional>
+#include <sstream>
 #include "types.hpp"
 #include "raylib.h"
-#include <vector>
+#include <intrin.h>
 
 using namespace std;
 
@@ -35,18 +37,122 @@ using namespace std;
 #define LOGVN(os, msg) (os << msg << " - " << __LINE__ << " " << __FILE__)
 #define UNREACHABLE_CODE (assert(false && "Invalid code path"))
 
-static std::chrono::time_point<std::chrono::high_resolution_clock> g_start_clock;
-static std::chrono::time_point<std::chrono::high_resolution_clock> g_end_clock;
-static double g_clock_cycles_var;
+enum class JobNames
+{
+    Evaluate,
+    Selection,
+    Simulation,
+    BackPropagate,
+    DetermineGameOutcomeDuringSimulation,
+    DeleteMoveDuringSimulation,
+    GetPlayerDuringSimulation,
+    AddPlayerDuringSimulation,
+    GetRandomNumberDuringSimulation,
+    SimulationFromPositionOnce,
+
+    JobNamesSize
+};
+
+// TODO(david): store these in some global storage and write them out in a file at some point
 #if defined (DEBUG_TIME)
-# define TIMED_BLOCK(job_name, job_expression) \
-    g_start_clock = std::chrono::high_resolution_clock::now(); \
+struct TimedBlocks
+{
+    struct
+    {
+        // TODO(david): for no reason other than I need a unique clock variable in the TIMED_BLOCK macro, as I'd like the job name to be scope
+        u64 unique_clock;
+        u64 total_elapsed_number_of_clock_cycles;
+        u32 counter_since_last_clear;
+    } timed_results[JobNames::JobNamesSize];
+};
+static TimedBlocks g_timed_blocks = {};
+
+constexpr r64 processor_clock_cycles_per_second = 2.11 * 1000000000;
+# define TIMED_BLOCK(job_expression, scoped_job_name) \
+    assert((u32)scoped_job_name < ArrayCount(g_timed_blocks.timed_results));\
+    g_timed_blocks.timed_results[(u32)scoped_job_name].unique_clock = __rdtsc(); \
     job_expression; \
-    g_end_clock = std::chrono::high_resolution_clock::now(); \
-    g_clock_cycles_var = 2.11 * std::chrono::duration_cast<std::chrono::nanoseconds>(g_end_clock - g_start_clock).count() / 1000000.0; \
-    // LOG(cout, "Clock cyles taken for " << job_name << ": " << g_clock_cycles_var << "M")
+    g_timed_blocks.timed_results[(u32)scoped_job_name].total_elapsed_number_of_clock_cycles += __rdtsc() - g_timed_blocks.timed_results[(u32)scoped_job_name].unique_clock;\
+    g_timed_blocks.timed_results[(u32)scoped_job_name].counter_since_last_clear++;
+
+string NumberToPrettyFormat(string str)
+{
+    return str;
+}
+
+string NumberToPrettyFormat(r64 number)
+{
+    static string prefixes[] = {
+        "(G)",
+        "(M)",
+        "(k)",
+        "(1)",
+        "(m)",
+        "(u)",
+        "(n)"
+    };
+    u32 prefix_index = 3;
+    while (number >= 1000.0)
+    {
+        number /= 1000.0;
+        assert(prefix_index > 0 && "didn't take care of bigger prefix than Giga");
+        --prefix_index;
+    }
+    while (number < 1.0)
+    {
+        number *= 1000.0;
+        assert(prefix_index < ArrayCount(prefixes) - 1 && "didn't take care of lower prefix than nano");
+        ++prefix_index;
+    }
+    assert(prefix_index < ArrayCount(prefixes));
+    ostringstream ss;
+    ss << fixed << setprecision(2) << number;
+    return ss.str() + prefixes[prefix_index];
+}
+
+# define NONAPI_LOG_JOB_FORMAT(os, job_name, total_elapsed_time, total_clock_cycles, number_of_samples, elapsed_time_for_one, clock_cycles_for_one) \
+    LOG(os, setw(40) << job_name << ": " << setw(20) << NumberToPrettyFormat(total_elapsed_time_in_milliseconds) << " | " << setw(20) << NumberToPrettyFormat(total_clock_cycles_in_mega) << " | " << setw(20) << NumberToPrettyFormat(number_of_samples) << " | " << setw(20) << NumberToPrettyFormat(elapsed_time_in_nanoseconds_for_one) << " | " << setw(20) << NumberToPrettyFormat(clock_cycles_in_kilo_for_one));
+# define NONAPI_LOG_JOB_SCOPED(os, job, job_non_scoped) \
+    assert((u32)job < ArrayCount(g_timed_blocks.timed_results));\
+    if (g_timed_blocks.timed_results[(u32)job].counter_since_last_clear > 0)\
+    {\
+        r64 clock_cycles = (r64)g_timed_blocks.timed_results[(u32)job].total_elapsed_number_of_clock_cycles;\
+        u32 sample_count = g_timed_blocks.timed_results[(u32)job].counter_since_last_clear;\
+        NONAPI_LOG_JOB_FORMAT(os, #job_non_scoped, clock_cycles / processor_clock_cycles_per_second, clock_cycles, sample_count, clock_cycles / processor_clock_cycles_per_second / (r64)sample_count, clock_cycles / (r64)sample_count);\
+    }
+# define NONAPI_LOG_JOB_NON_SCOPED(os, job) NONAPI_LOG_JOB_SCOPED(os, JobNames::job, job)
+
+// TODO(david): is there a way to iterate over the enumeration here?
+# define LOG_JOBS(os) \
+    ios::fmtflags old_os_flags = os.flags();\
+    os << fixed << setprecision(3);\
+    LOG(os, string(77, '-') + "== TIMED JOBS ==" + string(77, '-'));\
+    NONAPI_LOG_JOB_FORMAT(os, "Job name", "Total elapsed time", "Total clock cycles", "Number of samples", "Elapsed time for one", "Clock cycles for one");\
+    NONAPI_LOG_JOB_NON_SCOPED(os, Evaluate);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, Selection);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, Simulation);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, BackPropagate);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, DetermineGameOutcomeDuringSimulation);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, DeleteMoveDuringSimulation);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, GetPlayerDuringSimulation);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, AddPlayerDuringSimulation);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, GetRandomNumberDuringSimulation);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, SimulationFromPositionOnce);\
+    LOG(os, string(171, '-'));\
+    os.flags(old_os_flags);
+# define LOG_JOB(os, job_name) \
+    ios::fmtflags old_os_flags = os.flags();\
+    os << fixed << setprecision(3);\
+    NONAPI_LOG_JOB_SCOPED(os, job_name, job_name);\
+    os.flags(old_os_flags)
+
+# define CLEAR_JOBS memset(&g_timed_blocks, 0, sizeof(g_timed_blocks))
+
 #else
 # define TIMED_BLOCK(job_name, job_expression) job_expression
+# define LOG_JOBS(os)
+# define LOG_JOB(os, job_name)
+# define CLEAR_JOBS
 #endif
 
 #if defined(DEBUG_WRITE_OUT)
@@ -78,7 +184,7 @@ enum class Player
 constexpr u32 GRID_DIM_ROW = 5;
 constexpr u32 GRID_DIM_COL = 5;
 constexpr u32 ConnectToWinCount = 4;
-constexpr std::chrono::milliseconds max_evaluation_time = 20000ms;
+constexpr std::chrono::milliseconds max_evaluation_time = 1000ms;
 
 struct Move
 {
@@ -472,7 +578,7 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
     TerminalType last_move_terminal_type = TerminalType::NEUTRAL;
 
     // make moves to arrive at the position and simulate the rest of the game
-    cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, last_player_to_move);
+    TIMED_BLOCK(cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, last_player_to_move), JobNames::DetermineGameOutcomeDuringSimulation);
 
     while (cur_game_state.outcome_for_previous_player == GameOutcome::NONE)
     {
@@ -481,10 +587,10 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
         {
             Move move = movesequence_from_position.moves[movesequence_index++];
 
-            assert(cur_game_state.move_to_player_map.GetPlayer(move) == Player::NONE);
-            cur_game_state.move_to_player_map.AddPlayer(move, cur_game_state.player_to_move);
+            TIMED_BLOCK(cur_game_state.legal_moveset.DeleteMove(move), JobNames::DeleteMoveDuringSimulation);
 
-            cur_game_state.legal_moveset.DeleteMove(move);
+            TIMED_BLOCK(assert(cur_game_state.move_to_player_map.GetPlayer(move) == Player::NONE), JobNames::GetPlayerDuringSimulation);
+            TIMED_BLOCK(cur_game_state.move_to_player_map.AddPlayer(move, cur_game_state.player_to_move), JobNames::AddPlayerDuringSimulation);
         }
         // generate a random move
         else
@@ -493,18 +599,19 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
 
             assert(cur_game_state.legal_moveset.moves_left > 0 && "if there aren't any more legal moves that means DetermineGameOutcome should have returned draw.. to be more precise, this is more of a stalemate position");
 
-            u32 random_move_index = GetRandomNumber(0, cur_game_state.legal_moveset.moves_left - 1);
+            TIMED_BLOCK(u32 random_move_index = GetRandomNumber(0, cur_game_state.legal_moveset.moves_left - 1), JobNames::GetRandomNumberDuringSimulation);
+
             Move random_move = cur_game_state.legal_moveset.moves[random_move_index];
             assert(random_move.IsValid());
-            cur_game_state.legal_moveset.DeleteMove(random_move);
+            TIMED_BLOCK(cur_game_state.legal_moveset.DeleteMove(random_move), JobNames::DeleteMoveDuringSimulation);
 
-            assert(cur_game_state.move_to_player_map.GetPlayer(random_move) == Player::NONE);
-            cur_game_state.move_to_player_map.AddPlayer(random_move, cur_game_state.player_to_move);
+            TIMED_BLOCK(assert(cur_game_state.move_to_player_map.GetPlayer(random_move) == Player::NONE), JobNames::GetPlayerDuringSimulation);
+            TIMED_BLOCK(cur_game_state.move_to_player_map.AddPlayer(random_move, cur_game_state.player_to_move), JobNames::AddPlayerDuringSimulation);
         }
 
         last_player_to_move = cur_game_state.player_to_move;
 
-        cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, last_player_to_move);
+        TIMED_BLOCK(cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, last_player_to_move), JobNames::DetermineGameOutcomeDuringSimulation);
 
         cur_game_state.player_to_move = (cur_game_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
     }
@@ -595,7 +702,7 @@ SimulationResult simulation_from_position(const MoveSequence &movesequence_from_
          ++current_simulation_count)
     {
         assert(number_of_simulations == 1 && "if there are multiple simulations, we need to add this fact to the simulation_result, as the calculation of the variance would be different");
-        simulation_result = simulation_from_position_once(movesequence_from_position, game_state, node, node_pool);
+        TIMED_BLOCK(simulation_result = simulation_from_position_once(movesequence_from_position, game_state, node, node_pool), JobNames::SimulationFromPositionOnce);
 
 #if defined(DEBUG_WRITE_OUT_SIM_RESULT)
         LOGN(g_simresult_fs, node->value << " ");
@@ -659,14 +766,15 @@ static void EvaluateMove(GameState *game_state, MCST *mcst, NodePool *node_pool,
     thread t([&selected_move, &stop_parent_sleep, &force_end_of_evaluation](GameState *game_state, MCST *mcst, NodePool *node_pool) {
         try
         {
-            TIMED_BLOCK("Evaluate", selected_move = mcst->Evaluate(game_state->legal_moveset, [&stop_parent_sleep, &force_end_of_evaluation](bool found_move){
+            r64 evaluate_time_result_m = 0.0;
+            TIMED_BLOCK(selected_move = mcst->Evaluate(game_state->legal_moveset, [&stop_parent_sleep, &force_end_of_evaluation](bool found_move){
                 if (found_move)
                 {
                     stop_parent_sleep = true;
                     return true;
                 }
                 return force_end_of_evaluation;
-            }, simulation_from_position, *node_pool, *game_state));
+            }, simulation_from_position, *node_pool, *game_state), JobNames::Evaluate);
         }
         catch (exception &e)
         {
@@ -751,8 +859,14 @@ static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_po
             }
             else
             {
+                // NOTE(david): Finished evaluation
                 g_evaluate_thread.join();
                 g_evaluate_thread_is_working = false;
+
+                static u32 timed_blocks_counter = 0;
+                ofstream timed_block_ofs("debug/timed_blocks/timed_block" + to_string(timed_blocks_counter++));
+                LOG_JOBS(timed_block_ofs);
+                CLEAR_JOBS;
                 LOG(cout, "Currently allocated nodes: " << node_pool->CurrentAllocatedNodes());
                 LOG(cout, "Total freed nodes: " << node_pool->TotalNumberOfFreedNodes());
                 if (g_selected_move.IsValid())
