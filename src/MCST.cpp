@@ -114,10 +114,23 @@ static string ControlledTypeToWord(ControlledType controlled_type)
     }
 }
 
-void MoveSequence::AddMove(Move move)
+template <u32 MoveSize>
+void MoveSequence<MoveSize>::AddMove(Move move)
 {
-    assert(number_of_moves < ArrayCount(MoveSequence::moves) && "not enough space in the move sequence");
-    moves[number_of_moves++] = move;
+    assert(moves_left < ArrayCount(MoveSequence::moves) && "not enough space in the move sequence");
+    moves[moves_left++] = move;
+}
+
+template <u32 MoveSize>
+Move MoveSequence<MoveSize>::PopMoveAtIndex(u32 move_index)
+{
+    assert(moves_left > 0);
+    assert(move_index < moves_left);
+    Move result_move = moves[move_index];
+    moves[move_index] = moves[moves_left - 1];
+    --moves_left;
+
+    return result_move;
 }
 
 NodePool *debug_node_pool;
@@ -841,22 +854,28 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
         i32 lower_bound_move_index = -1;
         i32 lower_bound_serialized_move = -1;
         // NOTE(david): get the lower bound serialized_move from the set of legal moves
-        for (u32 move_index = 0; move_index < cur_legal_moves_from_node.moves_left; ++move_index)
+        for (u32 move_index = 0; move_index < ArrayCount(cur_legal_moves_from_node.moves); ++move_index)
         {
-            u32 move_serialized = cur_legal_moves_from_node.moves[move_index].Serialize();
-            if (highest_serialized_move == -1 || move_serialized > highest_serialized_move)
+            // TODO(david): implement iterator for the MoveSet
+            // TODO(david): rename serialize/deserialize to just GetMoveIndex and MoveFromIndex or smthin
+            Move cur_move = cur_legal_moves_from_node.moves[move_index];
+            if (cur_move.IsValid() == false)
+            {
+                continue ;
+            }
+            if (highest_serialized_move == -1 || move_index > highest_serialized_move)
             {
                 // NOTE(david): if haven't chosen a move before or the current move is higher by order
-                if (lower_bound_serialized_move == -1 || move_serialized < lower_bound_serialized_move)
+                if (lower_bound_serialized_move == -1 || move_index < lower_bound_serialized_move)
                 {
-                    lower_bound_serialized_move = move_serialized;
+                    lower_bound_serialized_move = move_index;
                     lower_bound_move_index = move_index;
                 }
             }
         }
         if (lower_bound_move_index != -1)
         {
-            assert(lower_bound_move_index >= 0 && lower_bound_move_index < cur_legal_moves_from_node.moves_left);
+            assert(lower_bound_move_index >= 0 && lower_bound_move_index < ArrayCount(cur_legal_moves_from_node.moves));
             Move selected_move = cur_legal_moves_from_node.moves[lower_bound_move_index];
             assert(selected_move.IsValid());
 

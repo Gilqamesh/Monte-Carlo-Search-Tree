@@ -2,6 +2,9 @@
 #include <cstdlib>
 #include <iostream>
 #include <iomanip>
+#if 0
+# define NDEBUG
+#endif
 #include <random>
 #include <stdexcept>
 #include <cassert>
@@ -12,6 +15,11 @@
 #include <intrin.h>
 
 using namespace std;
+
+constexpr u32 GRID_DIM_ROW = 5;
+constexpr u32 GRID_DIM_COL = 5;
+constexpr u32 ConnectToWinCount = 4;
+constexpr std::chrono::milliseconds max_evaluation_time = 5000ms;
 
 #if 1
 # define DEBUG_TIME
@@ -44,10 +52,13 @@ enum class JobNames
     Simulation,
     BackPropagate,
     DetermineGameOutcomeDuringSimulation,
+    DetermineGameOutcomeAfterMoveDuringSimulation,
     DeleteMoveDuringSimulation,
     GetPlayerDuringSimulation,
     AddPlayerDuringSimulation,
+    InitializeRandomNumberSequenceDuringSimulation,
     GetRandomNumberDuringSimulation,
+    PopMoveAtIndexDuringSimulation,
     SimulationFromPositionOnce,
 
     JobNamesSize
@@ -111,7 +122,7 @@ string NumberToPrettyFormat(r64 number)
 }
 
 # define NONAPI_LOG_JOB_FORMAT(os, job_name, total_elapsed_time, total_clock_cycles, number_of_samples, elapsed_time_for_one, clock_cycles_for_one) \
-    LOG(os, setw(40) << job_name << ": " << setw(20) << NumberToPrettyFormat(total_elapsed_time_in_milliseconds) << " | " << setw(20) << NumberToPrettyFormat(total_clock_cycles_in_mega) << " | " << setw(20) << NumberToPrettyFormat(number_of_samples) << " | " << setw(20) << NumberToPrettyFormat(elapsed_time_in_nanoseconds_for_one) << " | " << setw(20) << NumberToPrettyFormat(clock_cycles_in_kilo_for_one));
+    LOG(os, setw(50) << job_name << ": " << setw(20) << NumberToPrettyFormat(total_elapsed_time) << " | " << setw(20) << NumberToPrettyFormat(total_clock_cycles) << " | " << setw(20) << NumberToPrettyFormat(number_of_samples) << " | " << setw(20) << NumberToPrettyFormat(elapsed_time_for_one) << " | " << setw(20) << NumberToPrettyFormat(clock_cycles_for_one));
 # define NONAPI_LOG_JOB_SCOPED(os, job, job_non_scoped) \
     assert((u32)job < ArrayCount(g_timed_blocks.timed_results));\
     if (g_timed_blocks.timed_results[(u32)job].counter_since_last_clear > 0)\
@@ -126,19 +137,22 @@ string NumberToPrettyFormat(r64 number)
 # define LOG_JOBS(os) \
     ios::fmtflags old_os_flags = os.flags();\
     os << fixed << setprecision(3);\
-    LOG(os, string(77, '-') + "== TIMED JOBS ==" + string(77, '-'));\
+    LOG(os, string(82, '-') + "== TIMED JOBS ==" + string(82, '-'));\
     NONAPI_LOG_JOB_FORMAT(os, "Job name", "Total elapsed time", "Total clock cycles", "Number of samples", "Elapsed time for one", "Clock cycles for one");\
     NONAPI_LOG_JOB_NON_SCOPED(os, Evaluate);\
     NONAPI_LOG_JOB_NON_SCOPED(os, Selection);\
     NONAPI_LOG_JOB_NON_SCOPED(os, Simulation);\
     NONAPI_LOG_JOB_NON_SCOPED(os, BackPropagate);\
     NONAPI_LOG_JOB_NON_SCOPED(os, DetermineGameOutcomeDuringSimulation);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, DetermineGameOutcomeAfterMoveDuringSimulation);\
     NONAPI_LOG_JOB_NON_SCOPED(os, DeleteMoveDuringSimulation);\
     NONAPI_LOG_JOB_NON_SCOPED(os, GetPlayerDuringSimulation);\
     NONAPI_LOG_JOB_NON_SCOPED(os, AddPlayerDuringSimulation);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, InitializeRandomNumberSequenceDuringSimulation);\
     NONAPI_LOG_JOB_NON_SCOPED(os, GetRandomNumberDuringSimulation);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, PopMoveAtIndexDuringSimulation);\
     NONAPI_LOG_JOB_NON_SCOPED(os, SimulationFromPositionOnce);\
-    LOG(os, string(171, '-'));\
+    LOG(os, string(181, '-'));\
     os.flags(old_os_flags);
 # define LOG_JOB(os, job_name) \
     ios::fmtflags old_os_flags = os.flags();\
@@ -181,14 +195,11 @@ enum class Player
     NONE
 };
 
-constexpr u32 GRID_DIM_ROW = 5;
-constexpr u32 GRID_DIM_COL = 5;
-constexpr u32 ConnectToWinCount = 4;
-constexpr std::chrono::milliseconds max_evaluation_time = 1000ms;
-
 struct Move
 {
+    // NOTE(david): first param
     u32 row;
+    // NOTE(david): second param
     u32 col;
 
     bool IsValid(void) const;
@@ -236,13 +247,13 @@ u32 Move::Serialize(void) const
 
 bool Move::IsValid(void) const
 {
-    return !(row == 10000 && col == 10000); 
+    return (row < GRID_DIM_ROW && col < GRID_DIM_COL);
 }
 
 void Move::Invalidate(void)
 {
-    row = 10000;
-    col = 10000;
+    row = GRID_DIM_ROW;
+    col = GRID_DIM_COL;
 }
 
 enum class GameOutcome
@@ -257,12 +268,19 @@ enum class GameOutcome
 struct MoveToPlayerMap
 {
     Player map[GRID_DIM_COL * GRID_DIM_ROW];
+    u32 available_grids;
 
     Player GetPlayer(u32 row, u32 col) const;
     Player GetPlayer(Move move) const;
     void   AddPlayer(Move move, Player player);
     void   Clear(void);
+    bool   IsFull(void);
 };
+
+bool MoveToPlayerMap::IsFull(void)
+{
+    return available_grids == 0;
+}
 
 Player MoveToPlayerMap::GetPlayer(u32 row, u32 col) const
 {
@@ -282,12 +300,15 @@ Player MoveToPlayerMap::GetPlayer(Move move) const
 void MoveToPlayerMap::AddPlayer(Move move, Player player)
 {
     u32 map_index = move.Serialize();
+    assert(available_grids > 0);
+    --available_grids;
     assert(map_index < ArrayCount(MoveToPlayerMap::map));
     map[map_index] = player;
 }
 
 void MoveToPlayerMap::Clear(void)
 {
+    available_grids = GRID_DIM_ROW * GRID_DIM_COL;
     for (u32 row = 0; row < GRID_DIM_ROW; ++row)
     {
         for (u32 col = 0; col < GRID_DIM_COL; ++col)
@@ -307,29 +328,45 @@ struct MoveSet
 
     void  DeleteMove(Move move);
     void  AddMove(Move move);
+    void  Clear(void);
 };
+
+void MoveSet::Clear(void)
+{
+    for (u32 move_index = 0; move_index < ArrayCount(moves); ++move_index)
+    {
+        moves[move_index].Invalidate();
+    }
+}
 
 void MoveSet::DeleteMove(Move move)
 {
     assert(moves_left > 0);
-    for (u32 move_index = 0; move_index < moves_left; ++move_index)
-    {
-        if (moves[move_index] == move)
-        {
-            assert(moves[move_index].IsValid());
-            moves[move_index] = moves[moves_left - 1];
-            moves[moves_left - 1].Invalidate();
-            --moves_left;
-            return ;
-        }
-    }
-    assert(false && "tried to delete a move that didn't exist");
+    --moves_left;
+    assert(move.IsValid());
+    u32 move_index = move.Serialize();
+    assert(moves[move_index].IsValid());
+    moves[move_index].Invalidate();
+    // for (u32 move_index = 0; move_index < moves_left; ++move_index)
+    // {
+    //     if (moves[move_index] == move)
+    //     {
+    //         assert(moves[move_index].IsValid());
+    //         moves[move_index] = moves[moves_left - 1];
+    //         moves[moves_left - 1].Invalidate();
+    //         --moves_left;
+    //         return ;
+    //     }
+    // }
+    // assert(false && "tried to delete a move that didn't exist");
 }
 
 void MoveSet::AddMove(Move move)
 {
+    assert(move.IsValid());
     u32 move_index = move.Serialize();
     assert(move_index < ArrayCount(MoveSet::moves));
+    assert(moves[move_index].IsValid() == false);
     moves[move_index] = move;
     ++moves_left;
 }
@@ -401,9 +438,108 @@ void PrintGameState(const GameState &game_state, ostream &os)
     }
 }
 
+// ASSUMPTION(david): prior GameState before the move was NONE, we want to see if that changed
+GameOutcome DetermineGameOutcomeAfterMove(GameState &game_state, Player player_to_move_and_win, Move last_move)
+{
+    // check all 8 directions
+    u32 north_counter = 0;
+    for (Move move = { last_move.row - 1, last_move.col }; ; --move.row, ++north_counter)
+    {
+        if (move.IsValid() == false || game_state.move_to_player_map.GetPlayer(move) != player_to_move_and_win)
+        {
+            break ;
+        }
+    }
+    u32 south_counter = 0;
+    for (Move move = { last_move.row + 1, last_move.col }; ; ++move.row, ++south_counter)
+    {
+        if (move.IsValid() == false || game_state.move_to_player_map.GetPlayer(move) != player_to_move_and_win)
+        {
+            break ;
+        }
+    }
+
+    if (north_counter + south_counter == ConnectToWinCount)
+    {
+        return GameOutcome::WIN;
+    }
+
+    u32 west_counter = 0;
+    for (Move move = { last_move.row, last_move.col - 1 }; ; --move.col, ++west_counter)
+    {
+        if (move.IsValid() == false || game_state.move_to_player_map.GetPlayer(move) != player_to_move_and_win)
+        {
+            break ;
+        }
+    }
+    u32 east_counter = 0;
+    for (Move move = { last_move.row, last_move.col + 1 }; ; ++move.col, ++east_counter)
+    {
+        if (move.IsValid() == false || game_state.move_to_player_map.GetPlayer(move) != player_to_move_and_win)
+        {
+            break ;
+        }
+    }
+
+    if (west_counter + east_counter == ConnectToWinCount)
+    {
+        return GameOutcome::WIN;
+    }
+
+    u32 north_west_counter = 0;
+    for (Move move = { last_move.row - 1, last_move.col - 1 }; ; --move.row, --move.col, ++north_west_counter)
+    {
+        if (move.IsValid() == false || game_state.move_to_player_map.GetPlayer(move) != player_to_move_and_win)
+        {
+            break ;
+        }
+    }
+    u32 south_east_counter = 0;
+    for (Move move = { last_move.row + 1, last_move.col + 1 }; ; ++move.row, ++move.col, ++south_east_counter)
+    {
+        if (move.IsValid() == false || game_state.move_to_player_map.GetPlayer(move) != player_to_move_and_win)
+        {
+            break ;
+        }
+    }
+
+    if (north_west_counter + south_east_counter == ConnectToWinCount)
+    {
+        return GameOutcome::WIN;
+    }
+
+    u32 north_east_counter = 0;
+    for (Move move = { last_move.row - 1, last_move.col + 1 }; ; --move.row, ++move.col, ++north_east_counter)
+    {
+        if (move.IsValid() == false || game_state.move_to_player_map.GetPlayer(move) != player_to_move_and_win)
+        {
+            break ;
+        }
+    }
+    u32 south_west_counter = 0;
+    for (Move move = { last_move.row + 1, last_move.col - 1 }; ; ++move.row, --move.col, ++south_west_counter)
+    {
+        if (move.IsValid() == false || game_state.move_to_player_map.GetPlayer(move) != player_to_move_and_win)
+        {
+            break ;
+        }
+    }
+
+    if (north_east_counter + south_west_counter == ConnectToWinCount)
+    {
+        return GameOutcome::WIN;
+    }
+
+    if (game_state.move_to_player_map.IsFull())
+    {
+        return GameOutcome::DRAW;
+    }
+
+    return GameOutcome::NONE;
+}
+
 GameOutcome DetermineGameOutcome(GameState &game_state, Player player_to_win)
 {
-    bool is_draw = true;
     // check rows/cols
     for (u32 row = 0; row < GRID_DIM_ROW; ++row)
     {
@@ -430,7 +566,6 @@ GameOutcome DetermineGameOutcome(GameState &game_state, Player player_to_win)
             }
             else
             {
-                is_draw = false;
                 cur_crosses = 0;
                 cur_circles = 0;
             }
@@ -461,7 +596,6 @@ GameOutcome DetermineGameOutcome(GameState &game_state, Player player_to_win)
             }
             else
             {
-                is_draw = false;
                 cur_crosses = 0;
                 cur_circles = 0;
             }
@@ -501,7 +635,6 @@ GameOutcome DetermineGameOutcome(GameState &game_state, Player player_to_win)
             }
             else
             {
-                is_draw = false;
                 cur_crosses = 0;
                 cur_circles = 0;
             }
@@ -532,14 +665,13 @@ GameOutcome DetermineGameOutcome(GameState &game_state, Player player_to_win)
             }
             else
             {
-                is_draw = false;
                 cur_crosses = 0;
                 cur_circles = 0;
             }
         }
     }
 
-    if (is_draw)
+    if (game_state.move_to_player_map.IsFull())
     {
         return GameOutcome::DRAW;
     }
@@ -550,7 +682,7 @@ GameOutcome DetermineGameOutcome(GameState &game_state, Player player_to_win)
 bool g_should_write_out_simulation;
 ofstream g_simresult_fs;
 
-SimulationResult simulation_from_position_once(const MoveSequence &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
+SimulationResult simulation_from_position_once(const MoveSequence<max_move_chain_depth> &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
 {
     GameState cur_game_state = game_state;
     Player player_that_needs_to_win = cur_game_state.player_to_move;
@@ -580,38 +712,52 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
     // make moves to arrive at the position and simulate the rest of the game
     TIMED_BLOCK(cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, last_player_to_move), JobNames::DetermineGameOutcomeDuringSimulation);
 
+    bool initialized_legal_move_sequence = false;
+    MoveSequence<GRID_DIM_COL * GRID_DIM_ROW> legal_move_sequence = {};
+
     while (cur_game_state.outcome_for_previous_player == GameOutcome::NONE)
     {
+        Move last_move;
+        last_move.Invalidate();
         // make a move from the move chain
-        if (movesequence_index < movesequence_from_position.number_of_moves)
+        if (movesequence_index < movesequence_from_position.moves_left)
         {
-            Move move = movesequence_from_position.moves[movesequence_index++];
-
-            TIMED_BLOCK(cur_game_state.legal_moveset.DeleteMove(move), JobNames::DeleteMoveDuringSimulation);
-
-            TIMED_BLOCK(assert(cur_game_state.move_to_player_map.GetPlayer(move) == Player::NONE), JobNames::GetPlayerDuringSimulation);
-            TIMED_BLOCK(cur_game_state.move_to_player_map.AddPlayer(move, cur_game_state.player_to_move), JobNames::AddPlayerDuringSimulation);
+            last_move = movesequence_from_position.moves[movesequence_index++];
+            
         }
         // generate a random move
         else
         {
+            if (initialized_legal_move_sequence == false)
+            {
+                TIMED_BLOCK(
+                    initialized_legal_move_sequence = true;
+                    for (u32 move_index = 0; move_index < ArrayCount(cur_game_state.legal_moveset.moves); ++move_index)
+                    {
+                        if (cur_game_state.legal_moveset.moves[move_index].IsValid())
+                        {
+                            legal_move_sequence.AddMove(cur_game_state.legal_moveset.moves[move_index]);
+                        }
+                    }
+                , JobNames::InitializeRandomNumberSequenceDuringSimulation);
+            }
             last_move_terminal_type = TerminalType::NOT_TERMINAL;
 
-            assert(cur_game_state.legal_moveset.moves_left > 0 && "if there aren't any more legal moves that means DetermineGameOutcome should have returned draw.. to be more precise, this is more of a stalemate position");
+            assert(legal_move_sequence.moves_left > 0 && "if there aren't any more legal moves that means DetermineGameOutcomeAfterMove should have returned draw.. to be more precise, this is more of a stalemate position");
 
-            TIMED_BLOCK(u32 random_move_index = GetRandomNumber(0, cur_game_state.legal_moveset.moves_left - 1), JobNames::GetRandomNumberDuringSimulation);
-
-            Move random_move = cur_game_state.legal_moveset.moves[random_move_index];
-            assert(random_move.IsValid());
-            TIMED_BLOCK(cur_game_state.legal_moveset.DeleteMove(random_move), JobNames::DeleteMoveDuringSimulation);
-
-            TIMED_BLOCK(assert(cur_game_state.move_to_player_map.GetPlayer(random_move) == Player::NONE), JobNames::GetPlayerDuringSimulation);
-            TIMED_BLOCK(cur_game_state.move_to_player_map.AddPlayer(random_move, cur_game_state.player_to_move), JobNames::AddPlayerDuringSimulation);
+            TIMED_BLOCK(u32 random_move_index = GetRandomNumber(0, legal_move_sequence.moves_left - 1), JobNames::GetRandomNumberDuringSimulation);
+            TIMED_BLOCK(last_move = legal_move_sequence.PopMoveAtIndex(random_move_index), JobNames::PopMoveAtIndexDuringSimulation);
         }
+        assert(last_move.IsValid());
+
+        TIMED_BLOCK(cur_game_state.legal_moveset.DeleteMove(last_move), JobNames::DeleteMoveDuringSimulation);
+
+        TIMED_BLOCK(assert(cur_game_state.move_to_player_map.GetPlayer(last_move) == Player::NONE), JobNames::GetPlayerDuringSimulation);
+        TIMED_BLOCK(cur_game_state.move_to_player_map.AddPlayer(last_move, cur_game_state.player_to_move), JobNames::AddPlayerDuringSimulation);
 
         last_player_to_move = cur_game_state.player_to_move;
 
-        TIMED_BLOCK(cur_game_state.outcome_for_previous_player = DetermineGameOutcome(cur_game_state, last_player_to_move), JobNames::DetermineGameOutcomeDuringSimulation);
+        TIMED_BLOCK(cur_game_state.outcome_for_previous_player = DetermineGameOutcomeAfterMove(cur_game_state, last_player_to_move, last_move), JobNames::DetermineGameOutcomeAfterMoveDuringSimulation);
 
         cur_game_state.player_to_move = (cur_game_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
     }
@@ -668,19 +814,19 @@ SimulationResult simulation_from_position_once(const MoveSequence &movesequence_
     }
 #endif
 
-    if (movesequence_index != movesequence_from_position.number_of_moves)
+    if (movesequence_index != movesequence_from_position.moves_left)
     {
-        assert(movesequence_index == movesequence_from_position.number_of_moves && "still have moves to apply to the position from movesequence so the simulation can't end before that");
+        assert(movesequence_index == movesequence_from_position.moves_left && "still have moves to apply to the position from movesequence so the simulation can't end before that");
     }
 
     return simulation_result;
 }
 
-SimulationResult simulation_from_position(const MoveSequence &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
+SimulationResult simulation_from_position(const MoveSequence<max_move_chain_depth> &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
 {
     SimulationResult simulation_result = {};
 
-    assert(movesequence_from_position.number_of_moves > 0 && "must have at least one move to apply to the position");
+    assert(movesequence_from_position.moves_left > 0 && "must have at least one move to apply to the position");
 
     g_should_write_out_simulation = true;
 
@@ -690,8 +836,8 @@ SimulationResult simulation_from_position(const MoveSequence &movesequence_from_
 #endif
 
     // choose the number of simulations based on the number of possible moves
-    assert(game_state.legal_moveset.moves_left >= movesequence_from_position.number_of_moves);
-    u32 number_of_moves_available_from_position = game_state.legal_moveset.moves_left - movesequence_from_position.number_of_moves;
+    assert(game_state.legal_moveset.moves_left >= movesequence_from_position.moves_left);
+    u32 number_of_moves_available_from_position = game_state.legal_moveset.moves_left - movesequence_from_position.moves_left;
     u32 number_of_simulations_weight = number_of_moves_available_from_position;
     u32 number_of_simulations = 1;
     // u32 number_of_simulations = max((u32)1, (u32)(number_of_simulations_weight));
@@ -734,6 +880,7 @@ static void InitializeGameState(GameState *game_state)
     *game_state = {};
     game_state->player_to_move = Player::CIRCLE;
     game_state->move_to_player_map.Clear();
+    game_state->legal_moveset.Clear();
     for (u32 row = 0; row < GRID_DIM_ROW; ++row)
     {
         for (u32 col = 0; col < GRID_DIM_COL; ++col)

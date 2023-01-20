@@ -39,14 +39,14 @@ struct TerminalInfo
     TerminalDepth terminal_depth;
 };
 
-// using MoveSequence: vector<Move> -> { Move[Move::NONE], u32 }
+template <u32 MoveSize>
 struct MoveSequence
 {
-    static constexpr u32 moves_size = 32;
-    Move moves[moves_size];
-    u32 number_of_moves;
+    Move moves[MoveSize];
+    u32 moves_left;
 
     void AddMove(Move move);
+    Move PopMoveAtIndex(u32 move_index);
 };
 
 // NOTE(david): must be signed
@@ -121,7 +121,8 @@ private:
     void FreeNodeHelper(Node *node);
 };
 
-using SimulateFromState = function<SimulationResult(const MoveSequence &move_chain_from_world_state, const GameState &game_state, Node *node, const NodePool &node_pool)>;
+constexpr u32 max_move_chain_depth = 32;
+using SimulateFromState = function<SimulationResult(const MoveSequence<max_move_chain_depth> &move_chain_from_world_state, const GameState &game_state, Node *node, const NodePool &node_pool)>;
 using TerminationPredicate = function<bool(bool found_perfect_move)>;
 
 class MCST
@@ -142,7 +143,7 @@ private:
     struct SelectionResult
     {
         Node *selected_node;
-        MoveSequence movesequence_from_position;
+        MoveSequence<max_move_chain_depth> movesequence_from_position;
     };
 
     SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, NodePool &node_pool);
