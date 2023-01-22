@@ -73,6 +73,7 @@ struct Node
 struct SimulationResult
 {
     r32 value;
+    u32 num_simulations;
 };
 
 // TODO(david): reallocation of more nodes if the nodepool is full?
@@ -95,7 +96,8 @@ struct NodePool
     {
         Node *children[allowed_branching_factor];
         u32 number_of_children;
-        i32 highest_serialized_move;
+        // NOTE(david): since 0 index is a legal move, this starts at -1
+        i32 highest_move_index;
     };
 
     ChildrenTables *_move_to_node_tables;
@@ -131,7 +133,7 @@ private:
     Node *_root_node;
 
 public:
-    MCST();
+    MCST() = default;
     MCST(const MCST &other) = delete;
     const MCST &operator=(const MCST &other) = delete;
 
@@ -146,14 +148,22 @@ private:
         MoveSequence<max_move_chain_depth> movesequence_from_position;
     };
 
+    struct BestChildren
+    {
+        Node *non_terminal;
+        Node *winning;
+        Node *losing;
+        Node *neutral;
+    };
+    BestChildren SelectBestChildren(Node *from_node, NodePool &node_pool);
+
+    Node *SelectBestChild(Node *from_node, NodePool &node_pool);
+
     SelectionResult _Selection(const MoveSet &legal_moveset_at_root_node, NodePool &node_pool);
     Node *_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, bool focus_on_lowest_utc_to_prune, NodePool &node_pool);
     Node *_Expansion(Node *from_node, NodePool &node_pool);
     void _BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult simulation_result);
     void PruneNode(Node *from_node, NodePool &node_pool);
-
-    using WinningMoveSelectionStrategy = function<Move(Node *from_node, NodePool &node_pool)>;
-    WinningMoveSelectionStrategy winning_move_selection_strategy_fn;
 };
 
 #endif

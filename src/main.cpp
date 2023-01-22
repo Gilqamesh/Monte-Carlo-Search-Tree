@@ -16,9 +16,9 @@
 
 using namespace std;
 
-constexpr u32 GRID_DIM_ROW = 5;
-constexpr u32 GRID_DIM_COL = 5;
-constexpr u32 ConnectToWinCount = 4;
+constexpr u32 GRID_DIM_ROW = 7;
+constexpr u32 GRID_DIM_COL = 7;
+constexpr u32 ConnectToWinCount = 5;
 constexpr std::chrono::milliseconds max_evaluation_time = 5000ms;
 
 #if 1
@@ -51,6 +51,7 @@ enum class JobNames
     Selection,
     Simulation,
     BackPropagate,
+    SelectBestChild,
     DetermineGameOutcomeDuringSimulation,
     DetermineGameOutcomeAfterMoveDuringSimulation,
     DeleteMoveDuringSimulation,
@@ -70,7 +71,7 @@ struct TimedBlocks
 {
     struct
     {
-        // TODO(david): for no reason other than I need a unique clock variable in the TIMED_BLOCK macro, as I'd like the job name to be scope
+        // TODO(david): for no reason other than I need a unique clock variable in the TIMED_BLOCK macro, as I'd like the job name to be scoped, so I can't use that as the varname
         u64 unique_clock;
         u64 total_elapsed_number_of_clock_cycles;
         u32 counter_since_last_clear;
@@ -143,6 +144,7 @@ string NumberToPrettyFormat(r64 number)
     NONAPI_LOG_JOB_NON_SCOPED(os, Selection);\
     NONAPI_LOG_JOB_NON_SCOPED(os, Simulation);\
     NONAPI_LOG_JOB_NON_SCOPED(os, BackPropagate);\
+    NONAPI_LOG_JOB_NON_SCOPED(os, SelectBestChild);\
     NONAPI_LOG_JOB_NON_SCOPED(os, DetermineGameOutcomeDuringSimulation);\
     NONAPI_LOG_JOB_NON_SCOPED(os, DetermineGameOutcomeAfterMoveDuringSimulation);\
     NONAPI_LOG_JOB_NON_SCOPED(os, DeleteMoveDuringSimulation);\
@@ -197,6 +199,7 @@ enum class Player
 
 struct Move
 {
+    // TODO(david): 1 param uniquely identifies the move, no need for two
     // NOTE(david): first param
     u32 row;
     // NOTE(david): second param
@@ -204,21 +207,17 @@ struct Move
 
     bool IsValid(void) const;
     void Invalidate(void);
-    u32 Serialize(void) const;
+    u32 GetIndex(void) const;
+
+    static Move MoveFromIndex(u32 move_index);
 };
 
-Move Deserialize(u32 serialized_move)
+Move Move::MoveFromIndex(u32 move_index)
 {
     Move result = {};
 
-    if (serialized_move > GRID_DIM_ROW * GRID_DIM_COL)
-    {
-        result.Invalidate();
-        return result;
-    }
-    
-    result.row = serialized_move / GRID_DIM_COL;
-    result.col = serialized_move - result.row * GRID_DIM_COL;
+    result.row = move_index / GRID_DIM_COL;
+    result.col = move_index - result.row * GRID_DIM_COL;
 
     return result;
 }
@@ -235,14 +234,14 @@ bool operator!=(const Move &a, const Move &b)
 
 bool operator<(const Move &a, const Move &b)
 {
-    return a.Serialize() < b.Serialize();
+    return a.GetIndex() < b.GetIndex();
 }
 
-u32 Move::Serialize(void) const
+u32 Move::GetIndex(void) const
 {
-    u32 index = row * GRID_DIM_COL + col;
+    u32 move_index = row * GRID_DIM_COL + col;
 
-    return index;
+    return move_index;
 }
 
 bool Move::IsValid(void) const
@@ -285,21 +284,21 @@ bool MoveToPlayerMap::IsFull(void)
 Player MoveToPlayerMap::GetPlayer(u32 row, u32 col) const
 {
     Move move = { row, col };
-    u32 map_index = move.Serialize();
+    u32 map_index = move.GetIndex();
     assert(map_index < ArrayCount(MoveToPlayerMap::map));
     return map[map_index];
 }
 
 Player MoveToPlayerMap::GetPlayer(Move move) const
 {
-    u32 map_index = move.Serialize();
+    u32 map_index = move.GetIndex();
     assert(map_index < ArrayCount(MoveToPlayerMap::map));
     return map[map_index];
 }
 
 void MoveToPlayerMap::AddPlayer(Move move, Player player)
 {
-    u32 map_index = move.Serialize();
+    u32 map_index = move.GetIndex();
     assert(available_grids > 0);
     --available_grids;
     assert(map_index < ArrayCount(MoveToPlayerMap::map));
@@ -314,7 +313,7 @@ void MoveToPlayerMap::Clear(void)
         for (u32 col = 0; col < GRID_DIM_COL; ++col)
         {
             Move move = { row, col };
-            u32 map_index = move.Serialize();
+            u32 map_index = move.GetIndex();
             map[map_index] = Player::NONE;
         }
     }
@@ -344,7 +343,7 @@ void MoveSet::DeleteMove(Move move)
     assert(moves_left > 0);
     --moves_left;
     assert(move.IsValid());
-    u32 move_index = move.Serialize();
+    u32 move_index = move.GetIndex();
     assert(moves[move_index].IsValid());
     moves[move_index].Invalidate();
     // for (u32 move_index = 0; move_index < moves_left; ++move_index)
@@ -364,7 +363,7 @@ void MoveSet::DeleteMove(Move move)
 void MoveSet::AddMove(Move move)
 {
     assert(move.IsValid());
-    u32 move_index = move.Serialize();
+    u32 move_index = move.GetIndex();
     assert(move_index < ArrayCount(MoveSet::moves));
     assert(moves[move_index].IsValid() == false);
     moves[move_index] = move;
@@ -441,6 +440,7 @@ void PrintGameState(const GameState &game_state, ostream &os)
 // ASSUMPTION(david): prior GameState before the move was NONE, we want to see if that changed
 GameOutcome DetermineGameOutcomeAfterMove(GameState &game_state, Player player_to_move_and_win, Move last_move)
 {
+    assert(game_state.move_to_player_map.GetPlayer(last_move) == player_to_move_and_win);
     // check all 8 directions
     u32 north_counter = 0;
     for (Move move = { last_move.row - 1, last_move.col }; ; --move.row, ++north_counter)
@@ -459,7 +459,7 @@ GameOutcome DetermineGameOutcomeAfterMove(GameState &game_state, Player player_t
         }
     }
 
-    if (north_counter + south_counter == ConnectToWinCount)
+    if (north_counter + south_counter + 1 == ConnectToWinCount)
     {
         return GameOutcome::WIN;
     }
@@ -481,7 +481,7 @@ GameOutcome DetermineGameOutcomeAfterMove(GameState &game_state, Player player_t
         }
     }
 
-    if (west_counter + east_counter == ConnectToWinCount)
+    if (west_counter + east_counter + 1 == ConnectToWinCount)
     {
         return GameOutcome::WIN;
     }
@@ -503,7 +503,7 @@ GameOutcome DetermineGameOutcomeAfterMove(GameState &game_state, Player player_t
         }
     }
 
-    if (north_west_counter + south_east_counter == ConnectToWinCount)
+    if (north_west_counter + south_east_counter + 1 == ConnectToWinCount)
     {
         return GameOutcome::WIN;
     }
@@ -525,7 +525,7 @@ GameOutcome DetermineGameOutcomeAfterMove(GameState &game_state, Player player_t
         }
     }
 
-    if (north_east_counter + south_west_counter == ConnectToWinCount)
+    if (north_east_counter + south_west_counter + 1 == ConnectToWinCount)
     {
         return GameOutcome::WIN;
     }
@@ -739,7 +739,8 @@ SimulationResult simulation_from_position_once(const MoveSequence<max_move_chain
                             legal_move_sequence.AddMove(cur_game_state.legal_moveset.moves[move_index]);
                         }
                     }
-                , JobNames::InitializeRandomNumberSequenceDuringSimulation);
+                    , JobNames::InitializeRandomNumberSequenceDuringSimulation
+                );
             }
             last_move_terminal_type = TerminalType::NOT_TERMINAL;
 
@@ -762,45 +763,82 @@ SimulationResult simulation_from_position_once(const MoveSequence<max_move_chain
         cur_game_state.player_to_move = (cur_game_state.player_to_move == Player::CIRCLE) ? Player::CROSS : Player::CIRCLE;
     }
 
-    last_player_to_move = last_player_to_move;
+    simulation_result.num_simulations = 1;
+    assert(player_that_needs_to_win == Player::CROSS && "below values are only for uncontrolled node");
     switch (cur_game_state.outcome_for_previous_player)
     {
         // TODO(david): define a terminal interval for values, as there can be other values than winning and losing
         // NOTE(david): maybe there is no winning/losing terminal type, only values
-        case GameOutcome::WIN:
-        {
-            simulation_result.value = player_that_needs_to_win == last_player_to_move ? 1.0 : -1.0;
-            if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
+        case GameOutcome::WIN: {
+            switch (player_that_needs_to_win)
             {
-                node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::WINNING : TerminalType::LOSING;
+                case Player::CIRCLE: {
+                    simulation_result.value = player_that_needs_to_win == last_player_to_move ? 1.0 : -1.0;
+                    if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
+                    {
+                        node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::WINNING : TerminalType::LOSING;
+                    }
+                } break ;
+                case Player::CROSS: {
+                    // TODO(david): opposing player wins, it doesn't have to be cross if we don't start with cross
+                    simulation_result.value = player_that_needs_to_win == last_player_to_move ? -1.0 : 1.0;
+                    if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
+                    {
+                        node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::LOSING : TerminalType::WINNING;
+                    }
+                } break ;
+                default: UNREACHABLE_CODE;
             }
-        }
-        break;
-        case GameOutcome::LOSS:
-        {
-            simulation_result.value = player_that_needs_to_win == last_player_to_move ? -1.0 : 1.0;
-            if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
+        } break ;
+        case GameOutcome::LOSS: {
+            switch (player_that_needs_to_win)
             {
-                node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::LOSING : TerminalType::WINNING;
+                case Player::CIRCLE: {
+                    simulation_result.value = player_that_needs_to_win == last_player_to_move ? -1.0 : 1.0;
+                    if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
+                    {
+                        node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::LOSING : TerminalType::WINNING;
+                    }
+                } break ;
+                case Player::CROSS: {
+                    // TODO(david): opposing player loses, it doesn't have to be cross if we don't start with cross
+                    simulation_result.value = player_that_needs_to_win == last_player_to_move ? 1.0 : -1.0;
+                    if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
+                    {
+                        node->terminal_info.terminal_type = player_that_needs_to_win == last_player_to_move ? TerminalType::WINNING : TerminalType::LOSING;
+                    }
+
+                } break ;
+                default: UNREACHABLE_CODE;
             }
-        }
-        break;
-        case GameOutcome::DRAW:
-        {
-            simulation_result.value = 0.0;
-            if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
+        } break ;
+        case GameOutcome::DRAW: {
+            switch (player_that_needs_to_win)
             {
-                node->terminal_info.terminal_type = TerminalType::NEUTRAL;
+                case Player::CIRCLE: {
+                    simulation_result.value = 0.0;
+                    if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
+                    {
+                        node->terminal_info.terminal_type = TerminalType::NEUTRAL;
+                    }
+                } break ;
+                case Player::CROSS: {
+                    simulation_result.value = 0.0;
+                    if (last_move_terminal_type != TerminalType::NOT_TERMINAL)
+                    {
+                        node->terminal_info.terminal_type = TerminalType::NEUTRAL;
+                    }
+                } break ;
+                default: UNREACHABLE_CODE;
             }
-        }
-        break;
-        default:
-        {
+        } break ;
+        default: {
             UNREACHABLE_CODE;
         }
     }
+
     node->value += simulation_result.value;
-    ++node->num_simulations;
+    node->num_simulations += simulation_result.num_simulations;
 
 #if defined(DEBUG_WRITE_OUT_SIM_RESULT)
     if (g_should_write_out_simulation)
@@ -824,7 +862,7 @@ SimulationResult simulation_from_position_once(const MoveSequence<max_move_chain
 
 SimulationResult simulation_from_position(const MoveSequence<max_move_chain_depth> &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
 {
-    SimulationResult simulation_result = {};
+    SimulationResult simulation_result_total = {};
 
     assert(movesequence_from_position.moves_left > 0 && "must have at least one move to apply to the position");
 
@@ -847,8 +885,9 @@ SimulationResult simulation_from_position(const MoveSequence<max_move_chain_dept
          current_simulation_count < number_of_simulations;
          ++current_simulation_count)
     {
-        assert(number_of_simulations == 1 && "if there are multiple simulations, we need to add this fact to the simulation_result, as the calculation of the variance would be different");
-        TIMED_BLOCK(simulation_result = simulation_from_position_once(movesequence_from_position, game_state, node, node_pool), JobNames::SimulationFromPositionOnce);
+        TIMED_BLOCK(SimulationResult simulation_subresult = simulation_from_position_once(movesequence_from_position, game_state, node, node_pool), JobNames::SimulationFromPositionOnce);
+        simulation_result_total.value += simulation_subresult.value;
+        simulation_result_total.num_simulations += simulation_subresult.num_simulations;
 
 #if defined(DEBUG_WRITE_OUT_SIM_RESULT)
         LOGN(g_simresult_fs, node->value << " ");
@@ -857,11 +896,11 @@ SimulationResult simulation_from_position(const MoveSequence<max_move_chain_dept
 
         if (node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
         {
-            number_of_simulations = 1;
+            // number_of_simulations = 1;
             // number_of_simulations = max((u32)1, (u32)(number_of_simulations_weight));
-            assert(node->num_simulations == 1);
+            // assert(node->num_simulations == 1);
 
-            node->value *= number_of_simulations;
+            // node->value *= number_of_simulations;
 
             assert(current_simulation_count == 0);
             break ;
@@ -872,7 +911,7 @@ SimulationResult simulation_from_position(const MoveSequence<max_move_chain_dept
     LOG(g_simresult_fs, "");
 #endif
 
-    return simulation_result;
+    return simulation_result_total;
 }
 
 static void InitializeGameState(GameState *game_state)
@@ -1009,6 +1048,7 @@ static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_po
                 // NOTE(david): Finished evaluation
                 g_evaluate_thread.join();
                 g_evaluate_thread_is_working = false;
+                g_finished_evaluation = false;
 
                 static u32 timed_blocks_counter = 0;
                 ofstream timed_block_ofs("debug/timed_blocks/timed_block" + to_string(timed_blocks_counter++));
@@ -1018,9 +1058,11 @@ static void UpdateGameState(GameState *game_state, MCST *mcst, NodePool *node_po
                 LOG(cout, "Total freed nodes: " << node_pool->TotalNumberOfFreedNodes());
                 if (g_selected_move.IsValid())
                 {
-                    g_finished_evaluation = false;
-
                     UpdateMove(game_state, g_selected_move);
+                }
+                else
+                {
+                    assert(false && "player to move is not updated");
                 }
             }
         }
