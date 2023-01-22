@@ -56,7 +56,7 @@ static string MoveToWord(Move move)
     {
         return "NONE";
     }
-    return "(" + to_string(move.col) + ", " + to_string(move.row) + ")";
+    return "(" + to_string(move.row) + ", " + to_string(move.col) + ")";
 }
 
 static string TerminalTypeToWord(TerminalType terminal_type)
@@ -325,7 +325,7 @@ u32 NodePool::CurrentAllocatedNodes(void)
 
 static void DebugPrintDecisionTreeHelper(Node *from_node, Player player_to_move, ofstream &tree_fs, NodePool &node_pool)
 {
-    if (from_node->depth > 4)
+    if (from_node->depth > 6)
     {
         return ;
     }
@@ -355,26 +355,26 @@ Node *MCST::SelectBestChild(Node *from_node, NodePool &node_pool)
 {
     Node *selected_node = nullptr;
 
-    BestChildren best_children = SelectBestChildren(from_node, node_pool);
+    ExtremumChildren extremum_children = GetExtremumChildren(from_node, node_pool);
 
     switch (from_node->controlled_type)
     {
         case ControlledType::CONTROLLED: {
-            if (best_children.winning)
+            if (extremum_children.best_winning != nullptr)
             {
-                selected_node = best_children.winning;
+                selected_node = extremum_children.best_winning;
             }
-            else if (best_children.neutral != nullptr)
+            else if (extremum_children.best_neutral != nullptr)
             {
-                selected_node = best_children.neutral;
+                selected_node = extremum_children.best_neutral;
             }
-            else if (best_children.non_terminal != nullptr)
+            else if (extremum_children.best_non_terminal != nullptr)
             {
-                selected_node = best_children.non_terminal;
+                selected_node = extremum_children.best_non_terminal;
             }
-            else if (best_children.losing != nullptr)
+            else if (extremum_children.best_losing != nullptr)
             {
-                selected_node = best_children.losing;
+                selected_node = extremum_children.best_losing;
             }
             else
             {
@@ -382,21 +382,21 @@ Node *MCST::SelectBestChild(Node *from_node, NodePool &node_pool)
             }
         } break ;
         case ControlledType::UNCONTROLLED: {
-            if (best_children.losing)
+            if (extremum_children.best_losing != nullptr)
             {
-                selected_node = best_children.losing;
+                selected_node = extremum_children.best_losing;
             }
-            else if (best_children.neutral != nullptr)
+            else if (extremum_children.best_neutral != nullptr)
             {
-                selected_node = best_children.neutral;
+                selected_node = extremum_children.best_neutral;
             }
-            else if (best_children.non_terminal != nullptr)
+            else if (extremum_children.best_non_terminal != nullptr)
             {
-                selected_node = best_children.non_terminal;
+                selected_node = extremum_children.best_non_terminal;
             }
-            else if (best_children.winning != nullptr)
+            else if (extremum_children.best_winning != nullptr)
             {
-                selected_node = best_children.winning;
+                selected_node = extremum_children.best_winning;
             }
             else
             {
@@ -478,14 +478,21 @@ Move MCST::Evaluate(const MoveSet &legal_moveset_at_root_node, TerminationPredic
     return best_node->move_to_get_here;
 }
 
-MCST::BestChildren MCST::SelectBestChildren(Node *from_node, NodePool &node_pool)
+MCST::ExtremumChildren MCST::GetExtremumChildren(Node *from_node, NodePool &node_pool, u32 min_simulation_confidence_cycle_treshold)
 {
-    BestChildren result = {};
+    ExtremumChildren result = {};
 
-    r64 non_terminal_uct;
-    r64 winning_uct;
-    r64 losing_uct;
-    r64 neutral_uct;
+    r64 best_non_terminal_uct;
+    r64 worst_non_terminal_uct;
+
+    r64 best_winning_uct;
+    r64 worst_winning_uct;
+
+    r64 best_losing_uct;
+    r64 worst_losing_uct;
+
+    r64 best_neutral_uct;
+    r64 worst_neutral_uct;
 
     NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(from_node);
     for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
@@ -493,7 +500,13 @@ MCST::BestChildren MCST::SelectBestChildren(Node *from_node, NodePool &node_pool
         Node *child_node = children_nodes->children[child_index];
         assert(child_node != nullptr && child_node->move_to_get_here.IsValid());
 
-        assert(child_node->num_simulations > 0 && "how is this child node chosen as a move but not simulated once? Did it not get to backpropagation?");
+        assert(child_node->num_simulations > 0 && "how is this child node chosen as a move but not simulated once?");
+        if (child_node->num_simulations < min_simulation_confidence_cycle_treshold)
+        {
+            // NOTE(david): needed for move cycling, above the treshold this node will be considered to be pruned for another move
+            continue ;
+        }
+        ++result.condition_checked_nodes_on_their_simulation_count;
 
         // dispatch to fn calls from a rule table based on unique combination of controlled type and terminal type
         r64 child_uct = UCT(child_node);
@@ -503,31 +516,51 @@ MCST::BestChildren MCST::SelectBestChildren(Node *from_node, NodePool &node_pool
                 switch (child_node->terminal_info.terminal_type)
                 {
                     case TerminalType::WINNING: {
-                        if (result.winning == nullptr || child_node->terminal_info.terminal_depth.winning < result.winning->terminal_info.terminal_depth.winning || (child_node->terminal_info.terminal_depth.winning == result.winning->terminal_info.terminal_depth.winning && child_uct > winning_uct))
+                        if (result.best_winning == nullptr || child_node->terminal_info.terminal_depth.winning < result.best_winning->terminal_info.terminal_depth.winning || (child_node->terminal_info.terminal_depth.winning == result.best_winning->terminal_info.terminal_depth.winning && child_uct > best_winning_uct))
                         {
-                            result.winning = child_node;
-                            winning_uct    = child_uct;
+                            result.best_winning = child_node;
+                            best_winning_uct    = child_uct;
+                        }
+                        if (result.worst_winning == nullptr || child_node->terminal_info.terminal_depth.winning > result.worst_winning->terminal_info.terminal_depth.winning || (child_node->terminal_info.terminal_depth.winning == result.worst_winning->terminal_info.terminal_depth.winning && child_uct < worst_winning_uct))
+                        {
+                            result.worst_winning = child_node;
+                            worst_winning_uct    = child_uct;
                         }
                     } break ;
                     case TerminalType::LOSING: {
-                        if (result.losing == nullptr || child_node->terminal_info.terminal_depth.losing > result.losing->terminal_info.terminal_depth.losing || (child_node->terminal_info.terminal_depth.losing == result.losing->terminal_info.terminal_depth.losing && child_uct > losing_uct))
+                        if (result.best_losing == nullptr || child_node->terminal_info.terminal_depth.losing > result.best_losing->terminal_info.terminal_depth.losing || (child_node->terminal_info.terminal_depth.losing == result.best_losing->terminal_info.terminal_depth.losing && child_uct > best_losing_uct))
                         {
-                            result.losing = child_node;
-                            losing_uct    = child_uct;
+                            result.best_losing = child_node;
+                            best_losing_uct    = child_uct;
+                        }
+                        if (result.worst_losing == nullptr || child_node->terminal_info.terminal_depth.losing < result.worst_losing->terminal_info.terminal_depth.losing || (child_node->terminal_info.terminal_depth.losing == result.worst_losing->terminal_info.terminal_depth.losing && child_uct < worst_losing_uct))
+                        {
+                            result.worst_losing = child_node;
+                            worst_losing_uct    = child_uct;
                         }
                     } break ;
                     case TerminalType::NEUTRAL: {
-                        if (result.neutral == nullptr || child_node->terminal_info.terminal_depth.neutral > result.neutral->terminal_info.terminal_depth.neutral || (child_node->terminal_info.terminal_depth.neutral == result.neutral->terminal_info.terminal_depth.neutral && child_uct > neutral_uct))
+                        if (result.best_neutral == nullptr || child_node->terminal_info.terminal_depth.neutral > result.best_neutral->terminal_info.terminal_depth.neutral || (child_node->terminal_info.terminal_depth.neutral == result.best_neutral->terminal_info.terminal_depth.neutral && child_uct > best_neutral_uct))
                         {
-                            result.neutral = child_node;
-                            neutral_uct    = child_uct;
+                            result.best_neutral = child_node;
+                            best_neutral_uct    = child_uct;
+                        }
+                        if (result.worst_neutral == nullptr || child_node->terminal_info.terminal_depth.neutral < result.worst_neutral->terminal_info.terminal_depth.neutral || (child_node->terminal_info.terminal_depth.neutral == result.worst_neutral->terminal_info.terminal_depth.neutral && child_uct < worst_neutral_uct))
+                        {
+                            result.worst_neutral = child_node;
+                            worst_neutral_uct    = child_uct;
                         }
                     } break ;
                     case TerminalType::NOT_TERMINAL: {
-                        if (result.non_terminal == nullptr || child_uct > non_terminal_uct)
+                        if (result.best_non_terminal == nullptr || child_uct > best_non_terminal_uct)
                         {
-                            result.non_terminal = child_node;
-                            non_terminal_uct    = child_uct;
+                            result.best_non_terminal = child_node;
+                            best_non_terminal_uct    = child_uct;
+                        }
+                        if (result.worst_non_terminal == nullptr || child_uct < worst_non_terminal_uct)
+                        {
+                            result.worst_non_terminal = child_node;
+                            worst_non_terminal_uct    = child_uct;
                         }
                     } break ;
                     default: UNREACHABLE_CODE;
@@ -537,31 +570,51 @@ MCST::BestChildren MCST::SelectBestChildren(Node *from_node, NodePool &node_pool
                 switch (child_node->terminal_info.terminal_type)
                 {
                     case TerminalType::WINNING: {
-                        if (result.winning == nullptr || child_node->terminal_info.terminal_depth.winning > result.winning->terminal_info.terminal_depth.winning || (child_node->terminal_info.terminal_depth.winning == result.winning->terminal_info.terminal_depth.winning && child_uct > winning_uct))
+                        if (result.best_winning == nullptr || child_node->terminal_info.terminal_depth.winning > result.best_winning->terminal_info.terminal_depth.winning || (child_node->terminal_info.terminal_depth.winning == result.best_winning->terminal_info.terminal_depth.winning && child_uct > best_winning_uct))
                         {
-                            result.winning = child_node;
-                            winning_uct    = child_uct;
+                            result.best_winning = child_node;
+                            best_winning_uct    = child_uct;
+                        }
+                        if (result.worst_winning == nullptr || child_node->terminal_info.terminal_depth.winning < result.worst_winning->terminal_info.terminal_depth.winning || (child_node->terminal_info.terminal_depth.winning == result.worst_winning->terminal_info.terminal_depth.winning && child_uct < worst_winning_uct))
+                        {
+                            result.worst_winning = child_node;
+                            worst_winning_uct    = child_uct;
                         }
                     } break ;
                     case TerminalType::LOSING: {
-                        if (result.losing == nullptr || child_node->terminal_info.terminal_depth.losing < result.losing->terminal_info.terminal_depth.losing || (child_node->terminal_info.terminal_depth.losing == result.losing->terminal_info.terminal_depth.losing && child_uct > losing_uct))
+                        if (result.best_losing == nullptr || child_node->terminal_info.terminal_depth.losing < result.best_losing->terminal_info.terminal_depth.losing || (child_node->terminal_info.terminal_depth.losing == result.best_losing->terminal_info.terminal_depth.losing && child_uct > best_losing_uct))
                         {
-                            result.losing = child_node;
-                            losing_uct    = child_uct;
+                            result.best_losing = child_node;
+                            best_losing_uct    = child_uct;
+                        }
+                        if (result.worst_losing == nullptr || child_node->terminal_info.terminal_depth.losing > result.worst_losing->terminal_info.terminal_depth.losing || (child_node->terminal_info.terminal_depth.losing == result.worst_losing->terminal_info.terminal_depth.losing && child_uct < worst_losing_uct))
+                        {
+                            result.worst_losing = child_node;
+                            worst_losing_uct    = child_uct;
                         }
                     } break ;
                     case TerminalType::NEUTRAL: {
-                        if (result.neutral == nullptr || child_node->terminal_info.terminal_depth.neutral > result.neutral->terminal_info.terminal_depth.neutral || (child_node->terminal_info.terminal_depth.neutral == result.neutral->terminal_info.terminal_depth.neutral && child_uct > neutral_uct))
+                        if (result.best_neutral == nullptr || child_node->terminal_info.terminal_depth.neutral > result.best_neutral->terminal_info.terminal_depth.neutral || (child_node->terminal_info.terminal_depth.neutral == result.best_neutral->terminal_info.terminal_depth.neutral && child_uct > best_neutral_uct))
                         {
-                            result.neutral = child_node;
-                            neutral_uct    = child_uct;
+                            result.best_neutral = child_node;
+                            best_neutral_uct    = child_uct;
+                        }
+                        if (result.worst_neutral == nullptr || child_node->terminal_info.terminal_depth.neutral < result.worst_neutral->terminal_info.terminal_depth.neutral || (child_node->terminal_info.terminal_depth.neutral == result.worst_neutral->terminal_info.terminal_depth.neutral && child_uct < worst_neutral_uct))
+                        {
+                            result.worst_neutral = child_node;
+                            worst_neutral_uct    = child_uct;
                         }
                     } break ;
                     case TerminalType::NOT_TERMINAL: {
-                        if (result.non_terminal == nullptr || child_uct > non_terminal_uct)
+                        if (result.best_non_terminal == nullptr || child_uct > best_non_terminal_uct)
                         {
-                            result.non_terminal = child_node;
-                            non_terminal_uct    = child_uct;
+                            result.best_non_terminal = child_node;
+                            best_non_terminal_uct    = child_uct;
+                        }
+                        if (result.worst_non_terminal == nullptr || child_uct < worst_non_terminal_uct)
+                        {
+                            result.worst_non_terminal = child_node;
+                            worst_non_terminal_uct    = child_uct;
                         }
                     } break ;
                     default: UNREACHABLE_CODE;
@@ -570,6 +623,22 @@ MCST::BestChildren MCST::SelectBestChildren(Node *from_node, NodePool &node_pool
             default: UNREACHABLE_CODE;
         }
     }
+
+    assert(result.best_winning == nullptr || result.best_winning->terminal_info.terminal_type == TerminalType::WINNING);
+    assert(result.worst_winning == nullptr || result.worst_winning->terminal_info.terminal_type == TerminalType::WINNING);
+    assert((result.best_winning == nullptr && result.worst_winning == nullptr) || (result.best_winning != nullptr && result.worst_winning != nullptr));
+   
+    assert(result.best_losing == nullptr || result.best_losing->terminal_info.terminal_type == TerminalType::LOSING);
+    assert(result.worst_losing == nullptr || result.worst_losing->terminal_info.terminal_type == TerminalType::LOSING);
+    assert((result.best_losing == nullptr && result.worst_losing == nullptr) || (result.best_losing != nullptr && result.worst_losing != nullptr));
+
+    assert(result.best_neutral == nullptr || result.best_neutral->terminal_info.terminal_type == TerminalType::NEUTRAL);
+    assert(result.worst_neutral == nullptr || result.worst_neutral->terminal_info.terminal_type == TerminalType::NEUTRAL);
+    assert((result.best_neutral == nullptr && result.worst_neutral == nullptr) || (result.best_neutral != nullptr && result.worst_neutral != nullptr));
+    
+    assert(result.best_non_terminal == nullptr || result.best_non_terminal->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
+    assert(result.worst_non_terminal == nullptr || result.worst_non_terminal->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
+    assert((result.best_non_terminal == nullptr && result.worst_non_terminal == nullptr) || (result.best_non_terminal != nullptr && result.worst_non_terminal != nullptr));
 
     return result;
 }
@@ -580,22 +649,31 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
 
     Node *selected_node = nullptr;
 
-    BestChildren best_children = SelectBestChildren(from_node, node_pool);
+    ExtremumChildren extremum_children = GetExtremumChildren(from_node, node_pool);
 
     switch (from_node->controlled_type)
     {
         case ControlledType::CONTROLLED: {
-            if (best_children.winning != nullptr)
+            if (extremum_children.best_winning != nullptr)
             {
+                // TODO(david): not only do these always belong together, but also when a node's terminality is set, might as well prune all its children? Sounds expensive, but probably worth it as it reduces the size of the tree
                 from_node->terminal_info.terminal_type = TerminalType::WINNING;
-                return best_children.winning;
+                extremum_children.best_winning->UpdateTerminalDepthForParentNode();
+
+                // TODO(david): prune children of from_node?
+
+                return from_node;
             }
         } break ;
         case ControlledType::UNCONTROLLED: {
-            if (best_children.losing != nullptr)
+            if (extremum_children.best_losing != nullptr)
             {
                 from_node->terminal_info.terminal_type = TerminalType::LOSING;
-                return best_children.losing;
+                extremum_children.best_losing->UpdateTerminalDepthForParentNode();
+
+                // TODO(david): prune children of from_node?
+
+                return from_node;
             }
         } break ;
         default: UNREACHABLE_CODE;
@@ -650,21 +728,28 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
             {
                 // NOTE(david): need to cycle moves as there aren't any slots available
 
-                if (best_children.non_terminal == nullptr)
+                if (extremum_children.best_non_terminal == nullptr)
                 {
-                    // NOTE(david): we only have terminal nodes that doesn't favor either side here, so prune one of the children (probably the worst one) and then expand with the new move
-                    // TODO(david): select the terminal move that is the worst amongst all of them
+                    // NOTE(david): we only have terminal nodes that doesn't favor either side here, so prune one of the children (the worst one) and then expand with the new move
                     if (from_node->controlled_type == ControlledType::CONTROLLED)
                     {
-                        if (best_children.losing)
+                        if (extremum_children.worst_losing)
                         {
-                            PruneNode(best_children.losing, node_pool);
-                            best_children.losing = nullptr;
+                            if (extremum_children.worst_losing == extremum_children.best_losing)
+                            {
+                                extremum_children.best_losing = nullptr;
+                            }
+                            PruneNode(extremum_children.worst_losing, node_pool);
+                            extremum_children.worst_losing = nullptr;
                         }
-                        else if (best_children.neutral)
+                        else if (extremum_children.worst_neutral)
                         {
-                            PruneNode(best_children.neutral, node_pool);
-                            best_children.neutral = nullptr;
+                            if (extremum_children.worst_neutral == extremum_children.best_neutral)
+                            {
+                                extremum_children.best_neutral = nullptr;
+                            }
+                            PruneNode(extremum_children.worst_neutral, node_pool);
+                            extremum_children.worst_neutral = nullptr;
                         }
                         else
                         {
@@ -673,15 +758,23 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     }
                     else if (from_node->controlled_type == ControlledType::UNCONTROLLED)
                     {
-                        if (best_children.winning)
+                        if (extremum_children.worst_winning)
                         {
-                            PruneNode(best_children.winning, node_pool);
-                            best_children.winning = nullptr;
+                            if (extremum_children.worst_winning == extremum_children.best_winning)
+                            {
+                                extremum_children.best_winning = nullptr;
+                            }
+                            PruneNode(extremum_children.worst_winning, node_pool);
+                            extremum_children.worst_winning = nullptr;
                         }
-                        else if (best_children.neutral)
+                        else if (extremum_children.worst_neutral)
                         {
-                            PruneNode(best_children.neutral, node_pool);
-                            best_children.neutral = nullptr;
+                            if (extremum_children.worst_neutral == extremum_children.best_neutral)
+                            {
+                                extremum_children.best_neutral = nullptr;
+                            }
+                            PruneNode(extremum_children.worst_neutral, node_pool);
+                            extremum_children.worst_neutral = nullptr;
                         }
                         else
                         {
@@ -703,19 +796,18 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     // NOTE(david): optimally we would also like to explore all the possibilities to a certain depth in order to determine if there are nearby terminal moves, how to do this? One approach that comes to mind is that after certain amounts of simulations, we could prune nodes further, the idea behind this is if that node is not terminal yet (which it isn't at this point) and if the mean value is below a treshold, then we could assume, that the node is not worth exploring further with a high confidence, so prune the node and choose a new move.. we could arrive at a state where we pruned all children, which should already be taken care of. What should the number of simulations be, where we are certain enough that the node can be condition checked to prune? Also what happens, when none of the nodes meet the condition check? Then all the children slots are taken by nodes which are okayish moves.. but we would still not know if there is a terminal moves from the unexplored ones.. so then we would want to prune the worse out of all the promising moves in order to explore further new ones, as there is no benefit in keeping the worst, as we'd just choose the best anyway.
                     Node *node_to_prune = nullptr;
 
-                    // TODO(david): choose the worst one -> implement worst children as well
                     switch (from_node->controlled_type)
                     {
                         case ControlledType::CONTROLLED: {
-                            if (best_children.losing)
+                            if (extremum_children.worst_losing)
                             {
-                                node_to_prune = best_children.losing;
+                                node_to_prune = extremum_children.worst_losing;
                             }
                         } break ;
                         case ControlledType::UNCONTROLLED: {
-                            if (best_children.winning)
+                            if (extremum_children.worst_winning)
                             {
-                                node_to_prune = best_children.winning;
+                                node_to_prune = extremum_children.worst_winning;
                             }
                         } break ;
                         default: UNREACHABLE_CODE;
@@ -731,37 +823,26 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     // NOTE(david): so that in case of high branching, the move won't be immediately cycled in case the min treshold approached 0
                     constexpr u32 min_simulations_for_move = 25;
                     // TODO(david): maybe this number should be a power of ArrayCount(NodePool::ChildrenTables::children) to have know at which depth the treshold approaches to 0 -> allowed time / time it takes to complete 1 evaluation
-                    constexpr u32 min_simulations_from_root = 243;
+                    constexpr u32 min_simulations_from_root = 2187;
                     u32 min_simulation_confidence_cycle_treshold = (u32)(min_simulations_from_root / branching_factor) + min_simulations_for_move;
-                    // NOTE(david): two tresholds for controlled/uncontrolled
+                    // NOTE(david): two tresholds for controlled/uncontrolled, force nodes to be terminal outside this interval
                     constexpr r64 min_mean_value_treshold = -0.95;
                     constexpr r64 max_mean_value_treshold = 0.95;
 
-                    u32 condition_checked_nodes_on_their_simulation_count = 0;
-                    pair<Node *, r64> mean_child_extremum = {};
+# if 0
                     for (u32 child_index = 0; child_index < children_nodes->number_of_children && node_to_prune == nullptr; ++child_index)
                     {
                         Node *child_node = children_nodes->children[child_index];
                         if (child_node->num_simulations >= min_simulation_confidence_cycle_treshold)
                         {
-                            ++condition_checked_nodes_on_their_simulation_count;
                             r64 child_mean_value = child_node->value / (r64)child_node->num_simulations;
                             switch (from_node->controlled_type)
                             {
                                 case ControlledType::CONTROLLED: {
                                     if (child_mean_value <= min_mean_value_treshold)
                                     {
+                                        assert(false);
                                         node_to_prune = child_node;
-                                    }
-                                    else
-                                    {
-                                        // TODO(david): take terminal depth into consideration once I figured out how to store terminal depth properly
-                                        // NOTE(david): keep the one with the lowest mean to prune
-                                        if (mean_child_extremum.first == nullptr || child_mean_value < mean_child_extremum.second)
-                                        {
-                                            mean_child_extremum.first = child_node;
-                                            mean_child_extremum.second = child_mean_value;
-                                        }
                                     }
                                 } break ;
                                 case ControlledType::UNCONTROLLED: {
@@ -769,47 +850,95 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                                     {
                                         node_to_prune = child_node;
                                     }
+                                } break ;
+                                default: UNREACHABLE_CODE;
+                            }
+                        }
+                    }
+#endif
+                    if (node_to_prune == nullptr)
+                    {
+                        // NOTE(david): none of the moves are terminal and none of them falls outside the mean value with enough simulations
+                        ExtremumChildren extremum_children_for_cycleing = GetExtremumChildren(from_node, node_pool, min_simulation_confidence_cycle_treshold);
+                        // NOTE(david): if there is only 1 condition checked node that have enough simulations, don't prune it yet, as it's our current best node
+                        if (extremum_children_for_cycleing.condition_checked_nodes_on_their_simulation_count > 1)
+                        {
+                            switch (from_node->controlled_type)
+                            {
+                                case ControlledType::CONTROLLED: {
+                                    if (extremum_children_for_cycleing.worst_losing)
+                                    {
+                                        assert(false && "should already have been selected");
+                                    }
+                                    else if (extremum_children_for_cycleing.worst_non_terminal)
+                                    {
+                                        node_to_prune = extremum_children_for_cycleing.worst_non_terminal;
+                                    }
+                                    else if (extremum_children_for_cycleing.worst_neutral)
+                                    {
+                                        node_to_prune = extremum_children_for_cycleing.worst_neutral;
+                                    }
                                     else
                                     {
-                                        // NOTE(david): keep the one with the highest mean to prune
-                                        if (mean_child_extremum.first == nullptr || child_mean_value > mean_child_extremum.second)
-                                        {
-                                            mean_child_extremum.first = child_node;
-                                            mean_child_extremum.second = child_mean_value;
-                                        }
+                                        assert(false && "if there is a winning move for controlled node, we already should have selected it");
+                                    }
+                                } break ;
+                                case ControlledType::UNCONTROLLED: {
+                                    if (extremum_children_for_cycleing.worst_winning)
+                                    {
+                                        assert(false && "should already have been selected");
+                                    }
+                                    else if (extremum_children_for_cycleing.worst_non_terminal)
+                                    {
+                                        node_to_prune = extremum_children_for_cycleing.worst_non_terminal;
+                                    }
+                                    else if (extremum_children_for_cycleing.worst_neutral)
+                                    {
+                                        node_to_prune = extremum_children_for_cycleing.worst_neutral;
+                                    }
+                                    else
+                                    {
+                                        assert(false && "if there is a losing move for uncontrolled node, we already should have selected it");
                                     }
                                 } break ;
                                 default: UNREACHABLE_CODE;
                             }
                         }
                     }
-                    if (node_to_prune == nullptr)
-                    {
-                        // NOTE(david): none of the moves are terminal and none of them falls outside the mean value with enough simulations
-                        // NOTE(david): if there is only 1 condition checked node that have enough simulations, don't prune it yet, as it's our current best node
-                        if (condition_checked_nodes_on_their_simulation_count > 1)
-                        {
-                            node_to_prune = mean_child_extremum.first;
-                        }
-                    }
 
                     if (node_to_prune != nullptr)
                     {
-                        if (node_to_prune == best_children.winning)
+                        if (node_to_prune == extremum_children.worst_winning)
                         {
-                            best_children.winning = nullptr;
+                            if (extremum_children.worst_winning == extremum_children.best_winning)
+                            {
+                                extremum_children.best_winning = nullptr;
+                            }
+                            extremum_children.best_winning = nullptr;
                         }
-                        else if (node_to_prune == best_children.losing)
+                        else if (node_to_prune == extremum_children.worst_losing)
                         {
-                            best_children.losing = nullptr;
+                            if (extremum_children.worst_losing == extremum_children.worst_losing)
+                            {
+                                extremum_children.worst_losing = nullptr;
+                            }
+                            extremum_children.worst_losing = nullptr;
                         }
-                        else if (node_to_prune == best_children.neutral)
+                        else if (node_to_prune == extremum_children.worst_neutral)
                         {
-                            best_children.neutral = nullptr;
+                            if (extremum_children.worst_neutral == extremum_children.best_neutral)
+                            {
+                                extremum_children.best_neutral = nullptr;
+                            }
+                            extremum_children.worst_neutral = nullptr;
                         }
-                        else if (node_to_prune == best_children.non_terminal)
+                        else if (node_to_prune == extremum_children.worst_non_terminal)
                         {
-                            best_children.non_terminal = nullptr;
+                            if (extremum_children.worst_non_terminal == extremum_children.best_non_terminal)
+                            {
+                                extremum_children.best_non_terminal = nullptr;
+                            }
+                            extremum_children.worst_non_terminal = nullptr;
                         }
                         // NOTE(david): if either one of the moves is terminally bad or all the nodes are non-terminal and either we have a node that falls outside of the mean value interval or none of them falls outside, in which case the one with the worst mean is selected
                         PruneNode(node_to_prune, node_pool);
@@ -832,10 +961,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
         else
         {
             // NOTE(david): none of the legal moves serialized are higher than the current highest serialized move stored in the child_table -> we don't have a new move
-            // if (from_node->parent == nullptr)
-            // {
-            //     LOG(cout, "all moves are exhausted for root node");
-            // }
+            // TODO(david): when transposition table is introduced, this will not yet be the case
         }
     }
 
@@ -845,57 +971,78 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
         switch (from_node->controlled_type)
         {
             case ControlledType::CONTROLLED: {
-                if (best_children.neutral != nullptr && best_children.non_terminal == nullptr)
+                if (extremum_children.best_neutral != nullptr && extremum_children.best_non_terminal == nullptr)
                 {
-                    assert(best_children.winning == nullptr && "this should have been selected already");
-                    // ASSUMPTION(david): if there is only terminal moves, that means there are no more moves to cycle, so mark from_node as neutral
+                    assert(extremum_children.best_winning == nullptr && "this should have been selected already");
+                    // TODO(david): rethink this assumption, especially when transposition tables are introduced
+                    // ASSUMPTION(david): if there is only terminal moves, that means there are no more moves to cycle, so mark from_node as neutral, update neutral terminal depth potentially
                     from_node->terminal_info.terminal_type = TerminalType::NEUTRAL;
+                    extremum_children.best_neutral->UpdateTerminalDepthForParentNode();
+
+                    // TODO(david): prune from_node's children
 
                     selected_node = from_node;
                 }
-                else if (best_children.non_terminal != nullptr)
+                else if (extremum_children.best_non_terminal != nullptr)
                 {
-                    selected_node = best_children.non_terminal;
+                    selected_node = extremum_children.best_non_terminal;
                 }
-                else if (best_children.losing != nullptr)
+                else if (extremum_children.best_losing != nullptr)
                 {
+                    // NOTE(david): only losing moves are available -> mark controlled node as losing, update losing terminal depth potentially
                     from_node->terminal_info.terminal_type = TerminalType::LOSING;
+                    extremum_children.best_losing->UpdateTerminalDepthForParentNode();
+
+                    // TODO(david): prune from_node's children
 
                     selected_node = from_node;
                 }
                 else
                 {
-                    // NOTE(david): all children nodes are pruned out -> mark controlled node as losing
+                    // NOTE(david): all children nodes are pruned out -> mark controlled node as losing, update its terminal depth potentially
                     from_node->terminal_info.terminal_type = TerminalType::LOSING;
+                    from_node->UpdateTerminalDepthForParentNode();
                     
+                    // TODO(david): prune from_node's children
+
                     selected_node = from_node;
                 }
             } break ;
             case ControlledType::UNCONTROLLED: {
-                if (best_children.neutral != nullptr && best_children.non_terminal == nullptr)
+                if (extremum_children.best_neutral != nullptr && extremum_children.best_non_terminal == nullptr)
                 {
-                    assert(best_children.losing == nullptr && "this should have been selected already");
-                    // ASSUMPTION(david): if there is only terminal moves, that means there are no more moves to cycle, so mark from_node as neutral
+                    assert(extremum_children.best_losing == nullptr && "this should have been selected already");
+                    // TODO(david): rethink this assumption, especially when transposition tables are introduced
+                    // ASSUMPTION(david): if there is only terminal moves, that means there are no more moves to cycle, so mark from_node as neutral, update its neutral terminal depth potentially
                     from_node->terminal_info.terminal_type = TerminalType::NEUTRAL;
+                    extremum_children.best_neutral->UpdateTerminalDepthForParentNode();
+
+                    // TODO(david): prune from_node's children
 
                     selected_node = from_node;
                 }
-                else if (best_children.non_terminal != nullptr)
+                else if (extremum_children.best_non_terminal != nullptr)
                 {
-                    selected_node = best_children.non_terminal;
+                    selected_node = extremum_children.best_non_terminal;
                 }
-                else if (best_children.winning != nullptr)
+                else if (extremum_children.best_winning != nullptr)
                 {
-                    // NOTE(david): all moves are winning -> mark uncontrolled node as winning
+                    // NOTE(david): all moves are winning -> mark uncontrolled node as winning, update its winning terminal depth potentially
                     from_node->terminal_info.terminal_type = TerminalType::WINNING;
+                    extremum_children.best_winning->UpdateTerminalDepthForParentNode();
+
+                    // TODO(david): prune from_node's children
 
                     selected_node = from_node;
                 }
                 else
                 {
-                    // NOTE(david): all children nodes are pruned out -> mark uncontrolled node as winning as there are no good moves for uncontrolled
+                    // NOTE(david): all children nodes are pruned out -> mark uncontrolled node as winning as there are no good moves for uncontrolled, update its winning terminal depth potentially
                     from_node->terminal_info.terminal_type = TerminalType::WINNING;
-                    
+                    from_node->UpdateTerminalDepthForParentNode();
+
+                    // TODO(david): prune from_node's children
+
                     selected_node = from_node;
                 }
             } break ;
@@ -979,39 +1126,98 @@ Node *MCST::_Expansion(Node *from_node, NodePool &node_pool)
     return result;
 }
 
-static void _updateTerminalDepthForParentNode(Node *cur_node)
+bool Node::UpdateTerminalDepthForParentNode(void)
 {
-    Node *parent_node = cur_node->parent;
-    assert(parent_node != nullptr);
-    if (parent_node->terminal_info.terminal_depth.winning == 0)
+    // IMPORTANT(david): pruning doesn't change terminal depth, updating when there is a new terminal node does however, which should be backpropagated
+    if (parent == nullptr)
     {
-        parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
-    }
-    if (parent_node->terminal_info.terminal_depth.losing == 0)
-    {
-        parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
-    }
-    if (parent_node->terminal_info.terminal_depth.neutral == 0)
-    {
-        parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
+        return false;
     }
 
-    if (cur_node->terminal_info.terminal_depth.winning < parent_node->terminal_info.terminal_depth.winning)
+    bool should_update_grandparent_terminal_depth_from_its_children = false;
+
+    /*
+        Concept of terminal depth:
+        During selecting the best or worst move for a node, we want some notion of having an idea whether a move has resulted in a terminated state. For this the move doesn't have to be terminal, rather it's an information on the depth on which that move has resulted in a terminal state.
+
+        The terminal depth is marked for a node when that node becomes a terminal outcome.
+        How to propagate back this information?
+        Controlling node wants least amount of terminal win for example.. TODO(david): finish thought process if my initial assumption is not right
+
+        Problem is that once a parent's terminal depth is updated, the grandparent's must also be updated if the grandparent held the terminal depth info of the parent's terminal depth info.. this forces rechecking the grandparent's children's terminal depth (the next best terminal depth shouldn't be cycled or pruned away by design)
+    */
+    // NOTE(david): if not initialized, just set the terminal depth to whatever the child is, as it's the best information about terminal depth at this point for the parent node
+    if (parent->terminal_info.terminal_depth.winning == 0)
     {
-        parent_node->terminal_info.terminal_depth.winning = cur_node->terminal_info.terminal_depth.winning;
+        parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
+        if (parent->terminal_info.terminal_depth.winning > 0)
+        {
+            should_update_grandparent_terminal_depth_from_its_children = true;
+        }
     }
-    if (cur_node->terminal_info.terminal_depth.losing > parent_node->terminal_info.terminal_depth.losing)
+    if (parent->terminal_info.terminal_depth.losing == 0)
     {
-        parent_node->terminal_info.terminal_depth.losing = cur_node->terminal_info.terminal_depth.losing;
+        parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
+        if (parent->terminal_info.terminal_depth.losing > 0)
+        {
+            should_update_grandparent_terminal_depth_from_its_children = true;
+        }
     }
-    if (cur_node->terminal_info.terminal_depth.neutral > parent_node->terminal_info.terminal_depth.neutral)
+    if (parent->terminal_info.terminal_depth.neutral == 0)
     {
-        parent_node->terminal_info.terminal_depth.neutral = cur_node->terminal_info.terminal_depth.neutral;
+        parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
+        if (parent->terminal_info.terminal_depth.neutral > 0)
+        {
+            should_update_grandparent_terminal_depth_from_its_children = true;
+        }
     }
+
+    // TODO(david): similar logic in GetExtremumChildren -> move this rule table to a central place
+    switch (parent->controlled_type)
+    {
+        case ControlledType::CONTROLLED: {
+            if (this->terminal_info.terminal_depth.winning < parent->terminal_info.terminal_depth.winning)
+            {
+                parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
+                should_update_grandparent_terminal_depth_from_its_children = true;
+            }
+            if (this->terminal_info.terminal_depth.losing > parent->terminal_info.terminal_depth.losing)
+            {
+                parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
+                should_update_grandparent_terminal_depth_from_its_children = true;
+            }
+            if (this->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
+            {
+                parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
+                should_update_grandparent_terminal_depth_from_its_children = true;
+            }
+        } break ;
+        case ControlledType::UNCONTROLLED: {
+            if (this->terminal_info.terminal_depth.winning > parent->terminal_info.terminal_depth.winning)
+            {
+                parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
+                should_update_grandparent_terminal_depth_from_its_children = true;
+            }
+            if (this->terminal_info.terminal_depth.losing < parent->terminal_info.terminal_depth.losing)
+            {
+                parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
+                should_update_grandparent_terminal_depth_from_its_children = true;
+            }
+            if (this->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
+            {
+                parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
+                should_update_grandparent_terminal_depth_from_its_children = true;
+            }
+        } break ;
+        default: UNREACHABLE_CODE;
+    }
+
+    return should_update_grandparent_terminal_depth_from_its_children;
 }
 
 void MCST::PruneNode(Node *node_to_prune, NodePool &node_pool)
 {
+    // NOTE(david): when pruning nodes, there is no need to update terminal depth, as we never prune the better terminal node, could even assert that here, but that's a bit expensive to do to iterate over the children and check that the pruned node doesn't have the best terminal depth (or at least a second one has the same terminal depth as well)
     assert(node_to_prune != _root_node && "TODO: what does it mean to prune the root node?");
     // LOG(cout, "pruning node..: " << node_to_prune);
 
@@ -1038,12 +1244,12 @@ void MCST::PruneNode(Node *node_to_prune, NodePool &node_pool)
     node_pool.FreeNode(node_to_prune);
 }
 
-void MCST::_BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult simulation_result)
+void MCST::_BackPropagate(Node *simulated_node, NodePool &node_pool, SimulationResult simulation_result)
 {
-    assert(from_node != _root_node && "root node is not a valid move so it couldn't have been simulated");
+    assert(simulated_node != _root_node && "root node is not a valid move so it couldn't have been simulated");
     assert(_root_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
 
-    assert(from_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL || from_node->num_simulations == 1 && "TODO: current implementation: simulate once, I need to reintroduce this number to the simulation result maybe");
+    assert(simulated_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL || simulated_node->num_simulations == 1 && "TODO: current implementation: simulate once, I need to reintroduce this number to the simulation result maybe");
 
     /*
         NOTE(david): don't backpropagate if the node needs to be pruned
@@ -1052,51 +1258,50 @@ void MCST::_BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult
             // TODO(david): - understand and maybe implement this: if the confidence interval doesn't overlap with the parent's confidence interval (? because the outcome of the node isn't very different therefore it's not worth exploring further)
     */
 
-    if (from_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
+    if (simulated_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
     {
-        Node *parent_node = from_node->parent;
+        Node *parent_node = simulated_node->parent;
         assert(parent_node != nullptr && "node can't be root to propagate back from, as if it was terminal we should have already returned an evaluation result");
 
-        // NOTE(david): only set the terminal depth if it hasn't already been set, if from_node isn't simulated for example but is terminal, that means it should already have been set
-        switch (from_node->terminal_info.terminal_type)
+        // TODO(david): whenever a node's terminal type is set, also set it's terminal depth -> move this to a centralized place
+        switch (parent_node->controlled_type)
         {
-            case TerminalType::WINNING: {
-                if (from_node->terminal_info.terminal_depth.winning == 0)
+            case ControlledType::CONTROLLED: {
+                if (simulated_node->terminal_info.terminal_type == TerminalType::WINNING)
                 {
-                    from_node->terminal_info.terminal_depth.winning = from_node->depth;
+                    parent_node->terminal_info.terminal_type = TerminalType::WINNING;
                 }
             } break ;
-            case TerminalType::LOSING: {
-                if (from_node->terminal_info.terminal_depth.losing == 0)
+            case ControlledType::UNCONTROLLED: {
+                if (simulated_node->terminal_info.terminal_type == TerminalType::LOSING)
                 {
-                    from_node->terminal_info.terminal_depth.losing = from_node->depth;
-                }
-            } break ;
-            case TerminalType::NEUTRAL: {
-                if (from_node->terminal_info.terminal_depth.neutral == 0)
-                {
-                    from_node->terminal_info.terminal_depth.neutral = from_node->depth;
+                    parent_node->terminal_info.terminal_type = TerminalType::LOSING;
                 }
             } break ;
             default: UNREACHABLE_CODE;
         }
 
-        if ((from_node->controlled_type == ControlledType::UNCONTROLLED && from_node->terminal_info.terminal_type == TerminalType::WINNING) || (from_node->controlled_type == ControlledType::CONTROLLED && from_node->terminal_info.terminal_type == TerminalType::LOSING))
-        {
-            parent_node->terminal_info.terminal_type = from_node->terminal_info.terminal_type;
-        }
-        _updateTerminalDepthForParentNode(from_node);
     }
+    bool should_update_parent_terminal_depth_from_its_children = simulated_node->UpdateTerminalDepthForParentNode();
 
-    Node *cur_node = from_node->parent;
+    Node *cur_node = simulated_node->parent;
     while (cur_node != nullptr)
     {
         Node *parent_node = cur_node->parent;
 
-        // TODO(david): add backpropagating rules terminal rules here?
-        if (parent_node)
+        // TODO(david): add backpropagating rules terminal rules here as above? in which case start with simulated_node and don't add simulation_result to the node in the simulation itself
+        if (should_update_parent_terminal_depth_from_its_children)
         {
-            _updateTerminalDepthForParentNode(cur_node);
+            should_update_parent_terminal_depth_from_its_children = false;
+            if (parent_node)
+            {
+                NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(parent_node);
+                for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
+                {
+                    Node *child = children_nodes->children[child_index];
+                    should_update_parent_terminal_depth_from_its_children |= child->UpdateTerminalDepthForParentNode();
+                }
+            }
         }
 
         cur_node->num_simulations += simulation_result.num_simulations;
@@ -1117,46 +1322,52 @@ void MCST::_BackPropagate(Node *from_node, NodePool &node_pool, SimulationResult
                 r64 mean = cur_node->value / (r64)cur_node->num_simulations;
                 if (mean <= lower_mean_prune_treshold)
                 {
-                    if (cur_node->controlled_type == ControlledType::CONTROLLED)
-                    {
-                        cur_node->terminal_info.terminal_type = TerminalType::LOSING;
-                        cur_node->terminal_info.terminal_depth.losing = cur_node->depth;
+                    assert(false);
+                    // NOTE(david): force node to be terminal based on its mean after enough simulations
+                    // TODO(david): similar logic, using the same backpropagating rules as above multiple times
 
-                        if (parent_node)
-                        {
-                            parent_node->terminal_info.terminal_type = cur_node->terminal_info.terminal_type;
-                            _updateTerminalDepthForParentNode(cur_node);
-                        }
-                    }
-                    else
+                    ControlledType controlling_type = cur_node->controlled_type == ControlledType::CONTROLLED ? ControlledType::UNCONTROLLED : ControlledType::CONTROLLED;
+                    switch (controlling_type)
                     {
-                        // NOTE(david): haven't finished backpropagation of the simulation, so account for this fact
-                        cur_node->num_simulations -= simulation_result.num_simulations;
-                        cur_node->value -= simulation_result.value;
-                        PruneNode(cur_node, node_pool);
-                        return ;
+                        case ControlledType::CONTROLLED: {
+                        } break ;
+                        case ControlledType::UNCONTROLLED: {
+                            if (parent_node)
+                            {
+                                parent_node->terminal_info.terminal_type = TerminalType::LOSING;
+                                cur_node->UpdateTerminalDepthForParentNode();
+                            }
+                        } break ;
+                        default: UNREACHABLE_CODE;
                     }
+                    // NOTE(david): haven't finished backpropagation of the simulation, so account for this fact
+                    cur_node->num_simulations -= simulation_result.num_simulations;
+                    cur_node->value -= simulation_result.value;
+                    PruneNode(cur_node, node_pool);
+                    return ;
                 }
                 else if (mean >= upper_mean_prune_treshold)
                 {
-                    if (cur_node->controlled_type == ControlledType::UNCONTROLLED)
+                    assert(false);
+                    ControlledType controlling_type = cur_node->controlled_type == ControlledType::CONTROLLED ? ControlledType::UNCONTROLLED : ControlledType::CONTROLLED;
+                    switch (controlling_type)
                     {
-                        cur_node->terminal_info.terminal_type = TerminalType::WINNING;
-                        cur_node->terminal_info.terminal_depth.winning = cur_node->depth;
-
-                        if (parent_node)
-                        {
-                            parent_node->terminal_info.terminal_type = cur_node->terminal_info.terminal_type;
-                            _updateTerminalDepthForParentNode(cur_node);                        
-                        }
+                        case ControlledType::CONTROLLED: {
+                            if (parent_node)
+                            {
+                                parent_node->terminal_info.terminal_type = TerminalType::WINNING;
+                                cur_node->UpdateTerminalDepthForParentNode();
+                            }
+                        } break ;
+                        case ControlledType::UNCONTROLLED: {
+                        } break ;
+                        default: UNREACHABLE_CODE;
                     }
-                    else
-                    {
-                        cur_node->num_simulations -= simulation_result.num_simulations;
-                        cur_node->value -= simulation_result.value;
-                        PruneNode(cur_node, node_pool);
-                        return ;
-                    }
+                    // NOTE(david): haven't finished backpropagation of the simulation, so account for this fact
+                    cur_node->num_simulations -= simulation_result.num_simulations;
+                    cur_node->value -= simulation_result.value;
+                    PruneNode(cur_node, node_pool);
+                    return ;
                 }
             }
         }

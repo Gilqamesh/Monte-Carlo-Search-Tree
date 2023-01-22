@@ -68,6 +68,11 @@ struct Node
     Move move_to_get_here;
 
     u16 depth;
+
+    // TODO(david): change this to ChangeTerminalType maybe as they are kind of coupled? Terminal Depth only has to be updated when the terminal type of a node changes from not terminal to terminal, in which case this should be recursing back to root, in which case it'd only have to be called once during backpropagation
+    // NOTE(david): returns true if parent's terminal depth has been changed, as that signals that the grandparent's terminal depth might also need to be updated by its children's terminal depth
+    // TODO(david): shouldn't this return more information other than the fact that the parent's terminal depth has been updated? For example: there has been a prune of a terminally losing node for a controlled parent node. The update shouldn't update losing depth. Also if it happens to update something else other than losing terminal depth even though the losing node doesn't exist anymore, this'll force updating all terminal depths from all children, even tho some children for the grapndparent might already have been cycled that'd give the best terminal depth of a certain type.
+    bool UpdateTerminalDepthForParentNode(void);
 };
 
 struct SimulationResult
@@ -148,14 +153,23 @@ private:
         MoveSequence<max_move_chain_depth> movesequence_from_position;
     };
 
-    struct BestChildren
+    struct ExtremumChildren
     {
-        Node *non_terminal;
-        Node *winning;
-        Node *losing;
-        Node *neutral;
+        Node *best_non_terminal;
+        Node *worst_non_terminal;
+
+        Node *best_winning;
+        Node *worst_winning;
+
+        Node *best_losing;
+        Node *worst_losing;
+
+        Node *best_neutral;
+        Node *worst_neutral;
+
+        u32 condition_checked_nodes_on_their_simulation_count;
     };
-    BestChildren SelectBestChildren(Node *from_node, NodePool &node_pool);
+    ExtremumChildren GetExtremumChildren(Node *from_node, NodePool &node_pool, u32 min_simulation_confidence_cycle_treshold = 0);
 
     Node *SelectBestChild(Node *from_node, NodePool &node_pool);
 

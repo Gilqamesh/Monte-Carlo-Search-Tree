@@ -16,10 +16,10 @@
 
 using namespace std;
 
-constexpr u32 GRID_DIM_ROW = 7;
-constexpr u32 GRID_DIM_COL = 7;
-constexpr u32 ConnectToWinCount = 5;
-constexpr std::chrono::milliseconds max_evaluation_time = 5000ms;
+constexpr u32 GRID_DIM_ROW = 5;
+constexpr u32 GRID_DIM_COL = 5;
+constexpr u32 ConnectToWinCount = 4;
+constexpr std::chrono::milliseconds max_evaluation_time = 15000ms;
 
 #if 1
 # define DEBUG_TIME
@@ -420,6 +420,16 @@ void PrintGameState(const GameState &game_state, ostream &os)
 {
     for (u32 row = 0; row < GRID_DIM_ROW; ++row)
     {
+        if (row == 0)
+        {
+            LOGN(os, "  ");
+            for (u32 col = 0; col < GRID_DIM_COL; ++col)
+            {
+                LOGN(os, to_string(col) + " ");
+            }
+            LOG(os, "");
+        }
+        LOGN(os, to_string(row) + " ");
         for (u32 col = 0; col < GRID_DIM_COL; ++col)
         {
             Player player_that_made_move = game_state.move_to_player_map.GetPlayer(row, col);
@@ -862,6 +872,8 @@ SimulationResult simulation_from_position_once(const MoveSequence<max_move_chain
 
 SimulationResult simulation_from_position(const MoveSequence<max_move_chain_depth> &movesequence_from_position, const GameState &game_state, Node *node, const NodePool &node_pool)
 {
+    assert(node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL && "terminal node doesn't have to be simulated");
+
     SimulationResult simulation_result_total = {};
 
     assert(movesequence_from_position.moves_left > 0 && "must have at least one move to apply to the position");
@@ -896,6 +908,20 @@ SimulationResult simulation_from_position(const MoveSequence<max_move_chain_dept
 
         if (node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
         {
+            // TODO(david): move this inside MCST, as the simulation should have as little burden on the node update as possible (optimally 0)
+            switch (node->terminal_info.terminal_type)
+            {
+                case TerminalType::WINNING: {
+                    node->terminal_info.terminal_depth.winning = node->depth;
+                } break ;
+                case TerminalType::LOSING: {
+                    node->terminal_info.terminal_depth.losing = node->depth;
+                } break ;
+                case TerminalType::NEUTRAL: {
+                    node->terminal_info.terminal_depth.neutral = node->depth;
+                } break ;
+                default: UNREACHABLE_CODE;
+            }
             // number_of_simulations = 1;
             // number_of_simulations = max((u32)1, (u32)(number_of_simulations_weight));
             // assert(node->num_simulations == 1);
