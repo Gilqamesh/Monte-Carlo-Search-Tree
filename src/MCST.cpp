@@ -126,7 +126,7 @@ ostream &operator<<(ostream &os, Node *node)
 {
     NodePool::ChildrenTables *children_table = debug_node_pool->GetChildren(node);
     Move highest_move_cycled = Move::MoveFromIndex(children_table->highest_move_index);
-    LOGN(os, "index: " << node->index << ", " << MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", sims: " << node->num_simulations << ", " << ControlledTypeToWord(node->controlled_type) << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", terminal depth(W/L/N): (" << node->terminal_info.terminal_depth.winning << "," << node->terminal_info.terminal_depth.losing << "," << node->terminal_info.terminal_depth.neutral << "), uct: " << (node->parent == nullptr ? 0.0 : UCT(node)) << ", highest move index: " << MoveToWord(highest_move_cycled));
+    LOGN(os, "depth: " << node->depth << ", index: " << node->index << ", " << MoveToWord(node->move_to_get_here) << ", value: " << node->value << ", sims: " << node->num_simulations << ", " << ControlledTypeToWord(node->controlled_type) << ", " << TerminalTypeToWord(node->terminal_info.terminal_type) << ", terminal depth(W/L/N): (" << node->terminal_info.terminal_depth.winning << "," << node->terminal_info.terminal_depth.losing << "," << node->terminal_info.terminal_depth.neutral << "), uct: " << (node->parent == nullptr ? 0.0 : UCT(node)) << ", highest move index: " << MoveToWord(highest_move_cycled));
 
     return os;
 }
@@ -207,6 +207,9 @@ static Node *InitializeNode(Node *node, Node *parent)
     }
     node->terminal_info.terminal_type = TerminalType::NOT_TERMINAL;
     node->terminal_info.terminal_depth = {};
+    node->terminal_info.terminal_depth.winning_continuation.Invalidate();
+    node->terminal_info.terminal_depth.losing_continuation.Invalidate();
+    node->terminal_info.terminal_depth.neutral_continuation.Invalidate();
     node->controlled_type = ControlledType::NONE;
     node->move_to_get_here.Invalidate();
 
@@ -329,7 +332,7 @@ static void DebugPrintDecisionTreeHelper(Node *from_node, Player player_to_move,
     {
         return ;
     }
-    LOG(tree_fs, string(from_node->depth * 4, ' ') << "(player to move: " << PlayerToWord(player_to_move) << ", depth: " << from_node->depth << ", " << from_node << ")");
+    LOG(tree_fs, string(from_node->depth * 4, ' ') << "(player to move: " << PlayerToWord(player_to_move) << ", " << from_node << ")");
 
     NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(from_node);
     for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
@@ -657,8 +660,10 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
             if (extremum_children.best_winning != nullptr)
             {
                 // TODO(david): not only do these always belong together, but also when a node's terminality is set, might as well prune all its children? Sounds expensive, but probably worth it as it reduces the size of the tree
+                assert(from_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
                 from_node->terminal_info.terminal_type = TerminalType::WINNING;
-                extremum_children.best_winning->UpdateTerminalDepthForParentNode();
+                // from_node->terminal_info.terminal_depth.winning = from_node->depth;
+                extremum_children.best_winning->UpdateTerminalDepthForParentNode(TerminalType::WINNING, node_pool);
 
                 // TODO(david): prune children of from_node?
 
@@ -668,8 +673,10 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
         case ControlledType::UNCONTROLLED: {
             if (extremum_children.best_losing != nullptr)
             {
+                assert(from_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
                 from_node->terminal_info.terminal_type = TerminalType::LOSING;
-                extremum_children.best_losing->UpdateTerminalDepthForParentNode();
+                // from_node->terminal_info.terminal_depth.losing = from_node->depth;
+                extremum_children.best_losing->UpdateTerminalDepthForParentNode(TerminalType::LOSING, node_pool);
 
                 // TODO(david): prune children of from_node?
 
@@ -823,7 +830,7 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     // NOTE(david): so that in case of high branching, the move won't be immediately cycled in case the min treshold approached 0
                     constexpr u32 min_simulations_for_move = 25;
                     // TODO(david): maybe this number should be a power of ArrayCount(NodePool::ChildrenTables::children) to have know at which depth the treshold approaches to 0 -> allowed time / time it takes to complete 1 evaluation
-                    constexpr u32 min_simulations_from_root = 2187;
+                    constexpr u32 min_simulations_from_root = 4096;
                     u32 min_simulation_confidence_cycle_treshold = (u32)(min_simulations_from_root / branching_factor) + min_simulations_for_move;
                     // NOTE(david): two tresholds for controlled/uncontrolled, force nodes to be terminal outside this interval
                     constexpr r64 min_mean_value_treshold = -0.95;
@@ -976,8 +983,10 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     assert(extremum_children.best_winning == nullptr && "this should have been selected already");
                     // TODO(david): rethink this assumption, especially when transposition tables are introduced
                     // ASSUMPTION(david): if there is only terminal moves, that means there are no more moves to cycle, so mark from_node as neutral, update neutral terminal depth potentially
+                    assert(from_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
                     from_node->terminal_info.terminal_type = TerminalType::NEUTRAL;
-                    extremum_children.best_neutral->UpdateTerminalDepthForParentNode();
+                    // from_node->terminal_info.terminal_depth.neutral = from_node->depth;
+                    extremum_children.best_neutral->UpdateTerminalDepthForParentNode(TerminalType::NEUTRAL, node_pool);
 
                     // TODO(david): prune from_node's children
 
@@ -990,8 +999,10 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                 else if (extremum_children.best_losing != nullptr)
                 {
                     // NOTE(david): only losing moves are available -> mark controlled node as losing, update losing terminal depth potentially
+                    assert(from_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
                     from_node->terminal_info.terminal_type = TerminalType::LOSING;
-                    extremum_children.best_losing->UpdateTerminalDepthForParentNode();
+                    // from_node->terminal_info.terminal_depth.losing = from_node->depth;
+                    extremum_children.best_losing->UpdateTerminalDepthForParentNode(TerminalType::LOSING, node_pool);
 
                     // TODO(david): prune from_node's children
 
@@ -999,9 +1010,10 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                 }
                 else
                 {
-                    // NOTE(david): all children nodes are pruned out -> mark controlled node as losing, update its terminal depth potentially
+                    // NOTE(david): all children nodes are pruned out -> mark controlled node as losing, update its terminal depth
+                    assert(from_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
                     from_node->terminal_info.terminal_type = TerminalType::LOSING;
-                    from_node->UpdateTerminalDepthForParentNode();
+                    from_node->terminal_info.terminal_depth.losing = from_node->depth + 1;
                     
                     // TODO(david): prune from_node's children
 
@@ -1014,8 +1026,10 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                     assert(extremum_children.best_losing == nullptr && "this should have been selected already");
                     // TODO(david): rethink this assumption, especially when transposition tables are introduced
                     // ASSUMPTION(david): if there is only terminal moves, that means there are no more moves to cycle, so mark from_node as neutral, update its neutral terminal depth potentially
+                    assert(from_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
                     from_node->terminal_info.terminal_type = TerminalType::NEUTRAL;
-                    extremum_children.best_neutral->UpdateTerminalDepthForParentNode();
+                    // from_node->terminal_info.terminal_depth.neutral = from_node->depth;
+                    extremum_children.best_neutral->UpdateTerminalDepthForParentNode(TerminalType::NEUTRAL, node_pool);
 
                     // TODO(david): prune from_node's children
 
@@ -1028,8 +1042,10 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                 else if (extremum_children.best_winning != nullptr)
                 {
                     // NOTE(david): all moves are winning -> mark uncontrolled node as winning, update its winning terminal depth potentially
+                    assert(from_node->terminal_info.terminal_type == TerminalType::NOT_TERMINAL);
                     from_node->terminal_info.terminal_type = TerminalType::WINNING;
-                    extremum_children.best_winning->UpdateTerminalDepthForParentNode();
+                    // from_node->terminal_info.terminal_depth.winning = from_node->depth;
+                    extremum_children.best_winning->UpdateTerminalDepthForParentNode(TerminalType::WINNING, node_pool);
 
                     // TODO(david): prune from_node's children
 
@@ -1037,9 +1053,9 @@ Node *MCST::_SelectChild(Node *from_node, const MoveSet &legal_moves_from_node, 
                 }
                 else
                 {
-                    // NOTE(david): all children nodes are pruned out -> mark uncontrolled node as winning as there are no good moves for uncontrolled, update its winning terminal depth potentially
+                    // NOTE(david): all children nodes are pruned out -> mark uncontrolled node as winning as there are no good moves for uncontrolled, update its winning terminal depth
                     from_node->terminal_info.terminal_type = TerminalType::WINNING;
-                    from_node->UpdateTerminalDepthForParentNode();
+                    from_node->terminal_info.terminal_depth.winning = from_node->depth + 1;
 
                     // TODO(david): prune from_node's children
 
@@ -1126,93 +1142,346 @@ Node *MCST::_Expansion(Node *from_node, NodePool &node_pool)
     return result;
 }
 
-bool Node::UpdateTerminalDepthForParentNode(void)
+TerminalType Node::UpdateTerminalDepthForParentNode(TerminalType terminal_type_to_update, NodePool &node_pool)
 {
+    TerminalType result = TerminalType::NOT_TERMINAL;
+
     // IMPORTANT(david): pruning doesn't change terminal depth, updating when there is a new terminal node does however, which should be backpropagated
     if (parent == nullptr)
     {
-        return false;
+        return result;
     }
 
-    bool should_update_grandparent_terminal_depth_from_its_children = false;
-
-    /*
-        Concept of terminal depth:
-        During selecting the best or worst move for a node, we want some notion of having an idea whether a move has resulted in a terminated state. For this the move doesn't have to be terminal, rather it's an information on the depth on which that move has resulted in a terminal state.
-
-        The terminal depth is marked for a node when that node becomes a terminal outcome.
-        How to propagate back this information?
-        Controlling node wants least amount of terminal win for example.. TODO(david): finish thought process if my initial assumption is not right
-
-        Problem is that once a parent's terminal depth is updated, the grandparent's must also be updated if the grandparent held the terminal depth info of the parent's terminal depth info.. this forces rechecking the grandparent's children's terminal depth (the next best terminal depth shouldn't be cycled or pruned away by design)
-    */
-    // NOTE(david): if not initialized, just set the terminal depth to whatever the child is, as it's the best information about terminal depth at this point for the parent node
-    if (parent->terminal_info.terminal_depth.winning == 0)
+    switch (terminal_type_to_update)
     {
-        parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
-        if (parent->terminal_info.terminal_depth.winning > 0)
-        {
-            should_update_grandparent_terminal_depth_from_its_children = true;
-        }
-    }
-    if (parent->terminal_info.terminal_depth.losing == 0)
-    {
-        parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
-        if (parent->terminal_info.terminal_depth.losing > 0)
-        {
-            should_update_grandparent_terminal_depth_from_its_children = true;
-        }
-    }
-    if (parent->terminal_info.terminal_depth.neutral == 0)
-    {
-        parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
-        if (parent->terminal_info.terminal_depth.neutral > 0)
-        {
-            should_update_grandparent_terminal_depth_from_its_children = true;
-        }
-    }
-
-    // TODO(david): similar logic in GetExtremumChildren -> move this rule table to a central place
-    switch (parent->controlled_type)
-    {
-        case ControlledType::CONTROLLED: {
-            if (this->terminal_info.terminal_depth.winning < parent->terminal_info.terminal_depth.winning)
+        case TerminalType::WINNING: {
+            assert(this->terminal_info.terminal_depth.winning > 0 && "child's winning terminal depth hasn't been initialized");
+            if (parent->terminal_info.terminal_depth.winning == 0)
             {
+                // NOTE(david): if winning terminal depth hasn't been initialize yet, initialize it
                 parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
-                should_update_grandparent_terminal_depth_from_its_children = true;
+                parent->terminal_info.terminal_depth.winning_continuation = this->move_to_get_here;
+
+                // NOTE(david): need to update grandparent
+                result = terminal_type_to_update;
             }
-            if (this->terminal_info.terminal_depth.losing > parent->terminal_info.terminal_depth.losing)
+            else
             {
-                parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
-                should_update_grandparent_terminal_depth_from_its_children = true;
-            }
-            if (this->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
-            {
-                parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
-                should_update_grandparent_terminal_depth_from_its_children = true;
+                assert(parent->terminal_info.terminal_depth.winning_continuation.IsValid() && "if winning continuation isn't initialized, handle it in separate condition");
+                switch (parent->controlled_type)
+                {
+                    case ControlledType::CONTROLLED: {
+                        if (this->move_to_get_here == parent->terminal_info.terminal_depth.winning_continuation)
+                        {
+                            // NOTE(david): winning terminal depth is from the same child
+
+                            if (this->terminal_info.terminal_depth.winning < parent->terminal_info.terminal_depth.winning)
+                            {
+                                parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
+                                // NOTE(david): improved winning terminal depth, need to update grandparent
+                                result = terminal_type_to_update;
+                            }
+                            else if (this->terminal_info.terminal_depth.winning > parent->terminal_info.terminal_depth.winning)
+                            {
+                                // NOTE(david): previously best continuation now has worse winning terminal depth -> recheck parent's children for best winning continuation
+                                NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(parent);
+                                for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
+                                {
+                                    Node *child = children_nodes->children[child_index];
+                                    if (child->terminal_info.terminal_depth.winning == 0)
+                                    {
+                                        continue ;
+                                    }
+                                    if (child_index == 0)
+                                    {
+                                        parent->terminal_info.terminal_depth.winning = child->terminal_info.terminal_depth.winning;
+                                        parent->terminal_info.terminal_depth.winning_continuation = child->move_to_get_here;
+                                    }
+                                    else if (child->terminal_info.terminal_depth.winning < parent->terminal_info.terminal_depth.winning)
+                                    {
+                                        parent->terminal_info.terminal_depth.winning = child->terminal_info.terminal_depth.winning;
+                                        parent->terminal_info.terminal_depth.winning_continuation = child->move_to_get_here;
+                                    }
+                                }
+                                result = terminal_type_to_update;
+                            }
+                        }
+                        else if (this->terminal_info.terminal_depth.winning < parent->terminal_info.terminal_depth.winning)
+                        {
+                            parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
+                            parent->terminal_info.terminal_depth.winning_continuation = this->move_to_get_here;
+
+                            result = terminal_type_to_update;
+                        }
+                    } break ;
+                    case ControlledType::UNCONTROLLED: {
+                        if (this->move_to_get_here == parent->terminal_info.terminal_depth.winning_continuation)
+                        {
+                            // NOTE(david): winning terminal depth is from the same child
+
+                            if (this->terminal_info.terminal_depth.winning > parent->terminal_info.terminal_depth.winning)
+                            {
+                                parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
+                                // NOTE(david): improved winning terminal depth, need to update grandparent
+                                result = terminal_type_to_update;
+                            }
+                            else if (this->terminal_info.terminal_depth.winning < parent->terminal_info.terminal_depth.winning)
+                            {
+                                // NOTE(david): previously best continuation now has worse winning terminal depth -> recheck parent's children for best winning continuation
+                                NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(parent);
+                                for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
+                                {
+                                    Node *child = children_nodes->children[child_index];
+                                    if (child->terminal_info.terminal_depth.winning == 0)
+                                    {
+                                        continue ;
+                                    }
+                                    if (child_index == 0)
+                                    {
+                                        parent->terminal_info.terminal_depth.winning = child->terminal_info.terminal_depth.winning;
+                                        parent->terminal_info.terminal_depth.winning_continuation = child->move_to_get_here;
+                                    }
+                                    else if (child->terminal_info.terminal_depth.winning > parent->terminal_info.terminal_depth.winning)
+                                    {
+                                        parent->terminal_info.terminal_depth.winning = child->terminal_info.terminal_depth.winning;
+                                        parent->terminal_info.terminal_depth.winning_continuation = child->move_to_get_here;
+                                    }
+                                }
+                                result = terminal_type_to_update;
+                            }
+                        }
+                        else if (this->terminal_info.terminal_depth.winning > parent->terminal_info.terminal_depth.winning)
+                        {
+                            parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
+                            parent->terminal_info.terminal_depth.winning_continuation = this->move_to_get_here;
+
+                            result = terminal_type_to_update;
+                        }
+                    } break ;
+                    default: UNREACHABLE_CODE;
+                }
             }
         } break ;
-        case ControlledType::UNCONTROLLED: {
-            if (this->terminal_info.terminal_depth.winning > parent->terminal_info.terminal_depth.winning)
+        case TerminalType::LOSING: {
+            assert(this->terminal_info.terminal_depth.losing > 0 && "child's losing terminal depth hasn't been initialized");
+            if (parent->terminal_info.terminal_depth.losing == 0)
             {
-                parent->terminal_info.terminal_depth.winning = this->terminal_info.terminal_depth.winning;
-                should_update_grandparent_terminal_depth_from_its_children = true;
-            }
-            if (this->terminal_info.terminal_depth.losing < parent->terminal_info.terminal_depth.losing)
-            {
+                // NOTE(david): if losing terminal depth hasn't been initialize yet, initialize it
                 parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
-                should_update_grandparent_terminal_depth_from_its_children = true;
+                parent->terminal_info.terminal_depth.losing_continuation = this->move_to_get_here;
+
+                // NOTE(david): need to update grandparent
+                result = terminal_type_to_update;
             }
-            if (this->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
+            else
             {
+                assert(parent->terminal_info.terminal_depth.losing_continuation.IsValid() && "if losing continuation isn't initialized, handle it in separate condition");
+                switch (parent->controlled_type)
+                {
+                    case ControlledType::CONTROLLED: {
+                        if (this->move_to_get_here == parent->terminal_info.terminal_depth.losing_continuation)
+                        {
+                            // NOTE(david): losing terminal depth is from the same child
+
+                            if (this->terminal_info.terminal_depth.losing > parent->terminal_info.terminal_depth.losing)
+                            {
+                                parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
+                                // NOTE(david): improved losing terminal depth, need to update grandparent
+                                result = terminal_type_to_update;
+                            }
+                            else if (this->terminal_info.terminal_depth.losing < parent->terminal_info.terminal_depth.losing)
+                            {
+                                // NOTE(david): previously best continuation now has worse losing terminal depth -> recheck parent's children for best losing continuation
+                                NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(parent);
+                                for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
+                                {
+                                    Node *child = children_nodes->children[child_index];
+                                    if (child->terminal_info.terminal_depth.losing == 0)
+                                    {
+                                        continue ;
+                                    }
+                                    if (child_index == 0)
+                                    {
+                                        parent->terminal_info.terminal_depth.losing = child->terminal_info.terminal_depth.losing;
+                                        parent->terminal_info.terminal_depth.losing_continuation = child->move_to_get_here;
+                                    }
+                                    else if (child->terminal_info.terminal_depth.losing > parent->terminal_info.terminal_depth.losing)
+                                    {
+                                        parent->terminal_info.terminal_depth.losing = child->terminal_info.terminal_depth.losing;
+                                        parent->terminal_info.terminal_depth.losing_continuation = child->move_to_get_here;
+                                    }
+                                }
+                                result = terminal_type_to_update;
+                            }
+                        }
+                        else if (this->terminal_info.terminal_depth.losing > parent->terminal_info.terminal_depth.losing)
+                        {
+                            parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
+                            parent->terminal_info.terminal_depth.losing_continuation = this->move_to_get_here;
+
+                            result = terminal_type_to_update;
+                        }
+                    } break ;
+                    case ControlledType::UNCONTROLLED: {
+                        if (this->move_to_get_here == parent->terminal_info.terminal_depth.losing_continuation)
+                        {
+                            // NOTE(david): losing terminal depth is from the same child
+
+                            if (this->terminal_info.terminal_depth.losing < parent->terminal_info.terminal_depth.losing)
+                            {
+                                parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
+                                // NOTE(david): improved losing terminal depth, need to update grandparent
+                                result = terminal_type_to_update;
+                            }
+                            else if (this->terminal_info.terminal_depth.losing > parent->terminal_info.terminal_depth.losing)
+                            {
+                                // NOTE(david): previously best continuation now has worse losing terminal depth -> recheck parent's children for best losing continuation
+                                NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(parent);
+                                for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
+                                {
+                                    Node *child = children_nodes->children[child_index];
+                                    if (child->terminal_info.terminal_depth.losing == 0)
+                                    {
+                                        continue ;
+                                    }
+                                    if (child_index == 0)
+                                    {
+                                        parent->terminal_info.terminal_depth.losing = child->terminal_info.terminal_depth.losing;
+                                        parent->terminal_info.terminal_depth.losing_continuation = child->move_to_get_here;
+                                    }
+                                    else if (child->terminal_info.terminal_depth.losing < parent->terminal_info.terminal_depth.losing)
+                                    {
+                                        parent->terminal_info.terminal_depth.losing = child->terminal_info.terminal_depth.losing;
+                                        parent->terminal_info.terminal_depth.losing_continuation = child->move_to_get_here;
+                                    }
+                                }
+                                result = terminal_type_to_update;
+                            }
+                        }
+                        else if (this->terminal_info.terminal_depth.losing < parent->terminal_info.terminal_depth.losing)
+                        {
+                            parent->terminal_info.terminal_depth.losing = this->terminal_info.terminal_depth.losing;
+                            parent->terminal_info.terminal_depth.losing_continuation = this->move_to_get_here;
+
+                            result = terminal_type_to_update;
+                        }
+                    } break ;
+                    default: UNREACHABLE_CODE;
+                }
+            }
+        } break ;
+        case TerminalType::NEUTRAL: {
+            assert(this->terminal_info.terminal_depth.neutral > 0 && "child's neutral terminal depth hasn't been initialized");
+            if (parent->terminal_info.terminal_depth.neutral == 0)
+            {
+                // NOTE(david): if neutral terminal depth hasn't been initialize yet, initialize it
                 parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
-                should_update_grandparent_terminal_depth_from_its_children = true;
+                parent->terminal_info.terminal_depth.neutral_continuation = this->move_to_get_here;
+
+                // NOTE(david): need to update the grandparent's neutral terminal depth as well
+                result = terminal_type_to_update;
+            }
+            else
+            {
+                assert(parent->terminal_info.terminal_depth.neutral_continuation.IsValid() && "if neutral continuation isn't initialized, handle it in separate condition");
+                switch (parent->controlled_type)
+                {
+                    case ControlledType::CONTROLLED: {
+                        if (this->move_to_get_here == parent->terminal_info.terminal_depth.neutral_continuation)
+                        {
+                            // NOTE(david): neutral terminal depth is from the same child
+
+                            if (this->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
+                            {
+                                parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
+                                // NOTE(david): improved neutral terminal depth, need to update grandparent
+                                result = terminal_type_to_update;
+                            }
+                            else if (this->terminal_info.terminal_depth.neutral < parent->terminal_info.terminal_depth.neutral)
+                            {
+                                // NOTE(david): previously best continuation now has worse neutral terminal depth -> recheck parent's children for best neutral continuation
+                                NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(parent);
+                                for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
+                                {
+                                    Node *child = children_nodes->children[child_index];
+                                    if (child->terminal_info.terminal_depth.neutral == 0)
+                                    {
+                                        continue ;
+                                    }
+                                    if (child_index == 0)
+                                    {
+                                        parent->terminal_info.terminal_depth.neutral = child->terminal_info.terminal_depth.neutral;
+                                        parent->terminal_info.terminal_depth.neutral_continuation = child->move_to_get_here;
+                                    }
+                                    else if (child->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
+                                    {
+                                        parent->terminal_info.terminal_depth.neutral = child->terminal_info.terminal_depth.neutral;
+                                        parent->terminal_info.terminal_depth.neutral_continuation = child->move_to_get_here;
+                                    }
+                                }
+                                result = terminal_type_to_update;
+                            }
+                        }
+                        else if (this->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
+                        {
+                            parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
+                            parent->terminal_info.terminal_depth.neutral_continuation = this->move_to_get_here;
+
+                            result = terminal_type_to_update;
+                        }
+                    } break ;
+                    case ControlledType::UNCONTROLLED: {
+                        if (this->move_to_get_here == parent->terminal_info.terminal_depth.neutral_continuation)
+                        {
+                            // NOTE(david): neutral terminal depth is from the same child
+
+                            if (this->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
+                            {
+                                parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
+                                // NOTE(david): improved neutral terminal depth, need to update grandparent
+                                result = terminal_type_to_update;
+                            }
+                            else if (this->terminal_info.terminal_depth.neutral < parent->terminal_info.terminal_depth.neutral)
+                            {
+                                // NOTE(david): previously best continuation now has worse neutral terminal depth -> recheck parent's children for best neutral continuation
+                                NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(parent);
+                                for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
+                                {
+                                    Node *child = children_nodes->children[child_index];
+                                    if (child->terminal_info.terminal_depth.neutral == 0)
+                                    {
+                                        continue ;
+                                    }
+                                    if (child_index == 0)
+                                    {
+                                        parent->terminal_info.terminal_depth.neutral = child->terminal_info.terminal_depth.neutral;
+                                        parent->terminal_info.terminal_depth.neutral_continuation = child->move_to_get_here;
+                                    }
+                                    else if (child->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
+                                    {
+                                        parent->terminal_info.terminal_depth.neutral = child->terminal_info.terminal_depth.neutral;
+                                        parent->terminal_info.terminal_depth.neutral_continuation = child->move_to_get_here;
+                                    }
+                                }
+                                result = terminal_type_to_update;
+                            }
+                        }
+                        else if (this->terminal_info.terminal_depth.neutral > parent->terminal_info.terminal_depth.neutral)
+                        {
+                            parent->terminal_info.terminal_depth.neutral = this->terminal_info.terminal_depth.neutral;
+                            parent->terminal_info.terminal_depth.neutral_continuation = this->move_to_get_here;
+
+                            result = terminal_type_to_update;
+                        }
+                    } break ;
+                    default: UNREACHABLE_CODE;
+                }
             }
         } break ;
         default: UNREACHABLE_CODE;
     }
 
-    return should_update_grandparent_terminal_depth_from_its_children;
+    return result;
 }
 
 void MCST::PruneNode(Node *node_to_prune, NodePool &node_pool)
@@ -1258,10 +1527,13 @@ void MCST::_BackPropagate(Node *simulated_node, NodePool &node_pool, SimulationR
             // TODO(david): - understand and maybe implement this: if the confidence interval doesn't overlap with the parent's confidence interval (? because the outcome of the node isn't very different therefore it's not worth exploring further)
     */
 
+    TerminalType should_update_parent_terminal_depth_from_its_children = TerminalType::NOT_TERMINAL;
     if (simulated_node->terminal_info.terminal_type != TerminalType::NOT_TERMINAL)
     {
         Node *parent_node = simulated_node->parent;
         assert(parent_node != nullptr && "node can't be root to propagate back from, as if it was terminal we should have already returned an evaluation result");
+
+        should_update_parent_terminal_depth_from_its_children = simulated_node->UpdateTerminalDepthForParentNode(simulated_node->terminal_info.terminal_type, node_pool);
 
         // TODO(david): whenever a node's terminal type is set, also set it's terminal depth -> move this to a centralized place
         switch (parent_node->controlled_type)
@@ -1270,19 +1542,19 @@ void MCST::_BackPropagate(Node *simulated_node, NodePool &node_pool, SimulationR
                 if (simulated_node->terminal_info.terminal_type == TerminalType::WINNING)
                 {
                     parent_node->terminal_info.terminal_type = TerminalType::WINNING;
+                    // parent_node->terminal_info.terminal_depth.winning = parent_node->depth;
                 }
             } break ;
             case ControlledType::UNCONTROLLED: {
                 if (simulated_node->terminal_info.terminal_type == TerminalType::LOSING)
                 {
                     parent_node->terminal_info.terminal_type = TerminalType::LOSING;
+                    // parent_node->terminal_info.terminal_depth.losing = parent_node->depth;
                 }
             } break ;
             default: UNREACHABLE_CODE;
         }
-
     }
-    bool should_update_parent_terminal_depth_from_its_children = simulated_node->UpdateTerminalDepthForParentNode();
 
     Node *cur_node = simulated_node->parent;
     while (cur_node != nullptr)
@@ -1290,18 +1562,9 @@ void MCST::_BackPropagate(Node *simulated_node, NodePool &node_pool, SimulationR
         Node *parent_node = cur_node->parent;
 
         // TODO(david): add backpropagating rules terminal rules here as above? in which case start with simulated_node and don't add simulation_result to the node in the simulation itself
-        if (should_update_parent_terminal_depth_from_its_children)
+        if (should_update_parent_terminal_depth_from_its_children != TerminalType::NOT_TERMINAL)
         {
-            should_update_parent_terminal_depth_from_its_children = false;
-            if (parent_node)
-            {
-                NodePool::ChildrenTables *children_nodes = node_pool.GetChildren(parent_node);
-                for (u32 child_index = 0; child_index < children_nodes->number_of_children; ++child_index)
-                {
-                    Node *child = children_nodes->children[child_index];
-                    should_update_parent_terminal_depth_from_its_children |= child->UpdateTerminalDepthForParentNode();
-                }
-            }
+            should_update_parent_terminal_depth_from_its_children = cur_node->UpdateTerminalDepthForParentNode(should_update_parent_terminal_depth_from_its_children, node_pool);
         }
 
         cur_node->num_simulations += simulation_result.num_simulations;
@@ -1335,7 +1598,8 @@ void MCST::_BackPropagate(Node *simulated_node, NodePool &node_pool, SimulationR
                             if (parent_node)
                             {
                                 parent_node->terminal_info.terminal_type = TerminalType::LOSING;
-                                cur_node->UpdateTerminalDepthForParentNode();
+                                parent_node->terminal_info.terminal_depth.losing = parent_node->depth;
+                                cur_node->UpdateTerminalDepthForParentNode(TerminalType::LOSING, node_pool);
                             }
                         } break ;
                         default: UNREACHABLE_CODE;
@@ -1356,7 +1620,8 @@ void MCST::_BackPropagate(Node *simulated_node, NodePool &node_pool, SimulationR
                             if (parent_node)
                             {
                                 parent_node->terminal_info.terminal_type = TerminalType::WINNING;
-                                cur_node->UpdateTerminalDepthForParentNode();
+                                parent_node->terminal_info.terminal_depth.winning = parent_node->depth;
+                                cur_node->UpdateTerminalDepthForParentNode(TerminalType::WINNING, node_pool);
                             }
                         } break ;
                         case ControlledType::UNCONTROLLED: {

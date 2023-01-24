@@ -24,6 +24,10 @@ enum class ControlledType
 
 struct TerminalDepth
 {
+    // NOTE(david): the moves are needed in order to know which child does the terminal depth belong to
+    Move winning_continuation;
+    Move losing_continuation;
+    Move neutral_continuation;
     u16 winning;
     u16 losing;
     u16 neutral;
@@ -49,6 +53,8 @@ struct MoveSequence
     Move PopMoveAtIndex(u32 move_index);
 };
 
+struct NodePool;
+
 // NOTE(david): must be signed
 typedef i32 NodeIndex;
 struct Node
@@ -70,9 +76,11 @@ struct Node
     u16 depth;
 
     // TODO(david): change this to ChangeTerminalType maybe as they are kind of coupled? Terminal Depth only has to be updated when the terminal type of a node changes from not terminal to terminal, in which case this should be recursing back to root, in which case it'd only have to be called once during backpropagation
-    // NOTE(david): returns true if parent's terminal depth has been changed, as that signals that the grandparent's terminal depth might also need to be updated by its children's terminal depth
+    // NOTE(david): returns terminal type if parent's terminal type's depth has been changed, as that signals that the grandparent's terminal depth might also need to be updated by its children's terminal depth
     // TODO(david): shouldn't this return more information other than the fact that the parent's terminal depth has been updated? For example: there has been a prune of a terminally losing node for a controlled parent node. The update shouldn't update losing depth. Also if it happens to update something else other than losing terminal depth even though the losing node doesn't exist anymore, this'll force updating all terminal depths from all children, even tho some children for the grapndparent might already have been cycled that'd give the best terminal depth of a certain type.
-    bool UpdateTerminalDepthForParentNode(void);
+    TerminalType UpdateTerminalDepthForParentNode(TerminalType terminal_type_to_update, NodePool &node_pool);
+
+    void UpdateTerminalType(TerminalType terminal_type);
 };
 
 struct SimulationResult
